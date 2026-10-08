@@ -1,0 +1,118 @@
+{
+  "http": {
+    "timeout_seconds": 120.0,
+    "connect_timeout_seconds": 10.0,
+    "error_body_max_chars": 4000
+  },
+  "tables": {
+    "flight_list": "pk_flight_list",
+    "events": "pk_events",
+    "ammunition_expenditures": "pk_ammunition_expenditure",
+    "lost_devices": "pk_lost_devices"
+  },
+  "query": {
+    "max_execution_time_seconds": 90,
+    "use_query_cache": false,
+    "event_table_limit": 100,
+    "lost_devices_table_limit": null
+  },
+  "required_fields": {
+    "flight_list": [
+      "flight_id",
+      "date",
+      "time_range",
+      "is_effective",
+      "device_type",
+      "main_purpose"
+    ],
+    "events": [
+      "flight_id",
+      "date",
+      "target_class",
+      "result"
+    ],
+    "ammunition_expenditures": [
+      "flight_id",
+      "date",
+      "bc_name",
+      "bc_count"
+    ],
+    "lost_devices": [
+      "flight_id",
+      "date",
+      "device",
+      "result"
+    ]
+  },
+  "selects": {
+    "flights": [
+      "flight_id",
+      "date",
+      "crew",
+      "device",
+      "direction",
+      "position",
+      "is_effective",
+      "device_type",
+      "main_result",
+      "main_purpose",
+      "sub_department",
+      "time_range"
+    ],
+    "timeline_flights": [
+      "flight_id",
+      "date",
+      "is_effective",
+      "time_range"
+    ],
+    "events": [
+      "flight_id",
+      "date",
+      "time",
+      "timestamp",
+      "flight_number",
+      "crew",
+      "flight_purpose",
+      "target_class",
+      "target_id",
+      "result",
+      "field_200",
+      "field_300",
+      "direction",
+      "id",
+      "units",
+      "row_hash",
+      "device",
+      "device_type_id",
+      "bc_name",
+      "bc_count"
+    ],
+    "lost_devices": [
+      "flight_id",
+      "date",
+      "time",
+      "device",
+      "result",
+      "device_type",
+      "row_hash"
+    ],
+    "lost_flights": [
+      "flight_id",
+      "date",
+      "time_range",
+      "device",
+      "direction",
+      "position",
+      "device_type",
+      "main_purpose",
+      "crew"
+    ],
+    "ammunition_expenditures": [
+      "flight_id",
+      "date",
+      "bc_name",
+      "bc_count",
+      "result"
+    ]
+  }
+}

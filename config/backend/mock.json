@@ -1,0 +1,84 @@
+{
+  "options": {
+    "direction": [
+      "Північ",
+      "Центр",
+      "Південь"
+    ],
+    "unit": [
+      "Група A",
+      "Група B",
+      "Група C",
+      "Група D"
+    ],
+    "category": [
+      "Тип 1",
+      "Тип 2",
+      "Тип 3"
+    ],
+    "asset": [
+      "Засіб A",
+      "Засіб B",
+      "Засіб C"
+    ],
+    "group": [
+      "Екіпаж 01",
+      "Екіпаж 02",
+      "Екіпаж 03",
+      "Екіпаж 04"
+    ],
+    "purpose": [
+      "Моніторинг",
+      "Огляд",
+      "Перевірка"
+    ],
+    "class_name": [
+      "Категорія A",
+      "Категорія B",
+      "Категорія C",
+      "Категорія D"
+    ],
+    "result": [
+      "Позитивний",
+      "Нейтральний",
+      "Негативний"
+    ],
+    "bbak": [],
+    "rota": [],
+    "battalion": []
+  },
+  "overview": {
+    "events_per_day_min": 120,
+    "events_per_day_max": 210,
+    "positive_ratio_min": 0.28,
+    "positive_ratio_max": 0.46,
+    "detected_ratio_min": 0.18,
+    "detected_ratio_max": 0.34,
+    "resolved_ratio_min": 0.32,
+    "resolved_ratio_max": 0.58,
+    "volume_min": 500,
+    "volume_max": 1600,
+    "delta_min": 1.5,
+    "delta_max": 16.0
+  },
+  "timeline": {
+    "max_days": 62,
+    "events_min": 100,
+    "events_max": 330,
+    "effective_ratio_min": 0.25,
+    "effective_ratio_max": 0.55
+  },
+  "events": {
+    "count": 36,
+    "base_hour": 8,
+    "minute_step_min": 9,
+    "minute_step_max": 24,
+    "base_lat": 40.7128,
+    "base_lon": -74.006,
+    "lat_spread": 0.075,
+    "lon_spread": 0.1,
+    "id_prefix": "EV-",
+    "id_start": 1000,
+    "grid_prefix": "GRID-"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "entities": {
+    "flight_list": {
+      "flight_id": ["unique_flight_id", "uniqueFlightId"],
+      "date": ["date"],
+      "crew": ["crew"],
+      "device": ["means", "device"],
+      "direction": ["direction"],
+      "position": ["position", "location_name", "location"],
+      "is_effective": ["is_effective", "isEffective"],
+      "device_type": ["device_type", "deviceType"],
+      "main_result": ["main_result", "mainResult"],
+      "main_purpose": ["main_purpose", "mainPurpose", "flight_purpose"],
+      "sub_department": ["sub_department", "subDepartment"],
+      "time_range": ["time_range", "timeRange"],
+      "bbak_id": ["bbak_id", "bbakId"],
+      "bbak_title": ["bbak_title", "bbakTitle"],
+      "rota_id": ["rota_id", "rotaId"],
+      "rota_title": ["rota_title", "rotaTitle"],
+      "unit_id": ["unit_id", "unitId"],
+      "unit_title": ["unit_title", "unitTitle", "unit"]
+    },
+    "events": {
+      "flight_id": ["unique_flight_id", "uniqueFlightId"],
+      "date": ["date"],
+      "time": ["time"],
+      "timestamp": ["timestamp", "event_time", "eventTime"],
+      "flight_number": ["flight_number", "flightNumber"],
+      "crew": ["crew"],
+      "flight_purpose": ["flight_purpose", "flightPurpose", "main_purpose", "mainPurpose"],
+      "target_class": ["target_class", "targetClass"],
+      "target_id": ["target_id", "targetId"],
+      "result": ["result"],
+      "field_200": ["field_200", "field200"],
+      "field_300": ["field_300", "field300"],
+      "direction": ["direction"],
+      "id": ["id"],
+      "units": ["units", "unit", "unit_title"],
+      "row_hash": ["row_hash", "rowHash"],
+      "device": ["means", "device"],
+      "device_type_id": ["device_type_id", "deviceTypeId"],
+      "bc_name": ["bc_name", "bcName"],
+      "bc_count": ["bc_count", "bcCount"]
+    },
+    "lost_devices": {
+      "flight_id": ["unique_flight_id", "uniqueFlightId"],
+      "date": ["date"],
+      "time": ["time"],
+      "device": ["means", "device"],
+      "result": ["result"],
+      "device_type": ["device_type", "deviceType"],
+      "row_hash": ["row_hash", "rowHash"]
+    },
+    "ammunition_expenditures": {
+      "flight_id": ["unique_flight_id", "uniqueFlightId"],
+      "date": ["date"],
+      "bc_name": ["bc_name", "bcName"],
+      "bc_count": ["bc_count", "bcCount"],
+      "result": ["result"]
+    }
+  }
+}

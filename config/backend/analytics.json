@@ -1,0 +1,102 @@
+{
+  "timezone": "Europe/Kyiv",
+  "day_period": {
+    "start": "07:00",
+    "end": "19:00"
+  },
+  "personnel_target_classes": [
+    "ос"
+  ],
+  "flight_purpose_groups": [
+    {
+      "key": "strike",
+      "label": "Ураження",
+      "purposes": [
+        "динамічне ураження",
+        "планове ураження",
+        "вільне полювання",
+        "засідка"
+      ]
+    },
+    {
+      "key": "logistics",
+      "label": "Логістичні",
+      "purposes": [
+        "доставка",
+        "евакуація",
+        "доставка/евакуація",
+        "доставка / евакуація"
+      ]
+    },
+    {
+      "key": "mining",
+      "label": "Мінування",
+      "purposes": [
+        "мінування"
+      ]
+    },
+    {
+      "key": "recon",
+      "label": "Розвідка",
+      "purposes": [
+        "розвідка",
+        "дорозвідка",
+        "зйомка ураження"
+      ]
+    }
+  ],
+  "excluded_analytics_purposes": [
+    "Інше",
+    "Доповідь",
+    "Виявлення/подавлення"
+  ],
+  "strike_device_types": [
+    "fpv",
+    "бомбери",
+    "ударні крила",
+    "fpv ппо"
+  ],
+  "lost_device_type_aliases": {
+    "mavic/autel": "Mavic/Autel",
+    "mavic autel": "Mavic/Autel",
+    "бомбери": "Бомбери",
+    "fpv ппо": "FPV ППО",
+    "нрк": "НРК",
+    "крило": "Крило",
+    "крила": "Крило",
+    "супровід нрк": "Супровід НРК"
+  },
+  "lost_devices_sentinel": "__lost_devices__",
+  "detected_ammunition_name": "виявлено",
+  "unknown_device_type_label": "Не визначено",
+  "fallback_purpose_matching": {
+    "recon_contains": "розвід",
+    "recon_exact": [
+      "зйомка ураження"
+    ],
+    "recon_group_key": "recon",
+    "logistics_contains": [
+      "достав",
+      "евакуац"
+    ],
+    "logistics_group_key": "logistics",
+    "mining_contains": "мінув",
+    "mining_group_key": "mining"
+  },
+  "followup_recon": {
+    "purpose": "дорозвідка",
+    "key": "followup_recon",
+    "label": "Дорозвідка"
+  },
+  "other_group": {
+    "key": "other",
+    "label": "Інше"
+  },
+  "personnel_target_prefixes": [
+    "ос ров"
+  ],
+  "result_names": {
+    "affected": "уражено",
+    "destroyed": "знищено"
+  }
+}

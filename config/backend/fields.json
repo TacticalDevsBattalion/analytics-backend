@@ -1,0 +1,84 @@
+{
+  "entities": {
+    "flight_list": {
+      "flight_id": "uniqueFlightId",
+      "date": "date",
+      "crew": "crew",
+      "device": "device",
+      "direction": "direction",
+      "position": "position",
+      "is_effective": "isEffective",
+      "device_type": "deviceType",
+      "main_result": "mainResult",
+      "main_purpose": "mainPurpose",
+      "sub_department": "subDepartment",
+      "time_range": "timeRange"
+    },
+    "events": {
+      "flight_id": "uniqueFlightId",
+      "date": "date",
+      "time": "time",
+      "timestamp": "timestamp",
+      "flight_number": "flightNumber",
+      "crew": "crew",
+      "flight_purpose": "flightPurpose",
+      "target_class": "targetClass",
+      "target_id": "targetId",
+      "result": "result",
+      "field_200": "field200",
+      "field_300": "field300",
+      "direction": "direction",
+      "id": "id",
+      "units": "units",
+      "row_hash": "rowHash",
+      "device": "device",
+      "device_type_id": "deviceTypeId",
+      "bc_name": "bcName",
+      "bc_count": "bcCount"
+    },
+    "lost_devices": {
+      "flight_id": "uniqueFlightId",
+      "date": "date",
+      "time": "time",
+      "device": "device",
+      "result": "result",
+      "device_type": "deviceType",
+      "row_hash": "rowHash"
+    },
+    "ammunition_expenditures": {
+      "flight_id": "uniqueFlightId",
+      "date": "date",
+      "bc_name": "bcName",
+      "bc_count": "bcCount",
+      "result": "result"
+    },
+    "device_types": {
+      "id": "id",
+      "label": "type"
+    },
+    "units": {
+      "label": "title"
+    },
+    "devices": {
+      "label": "title"
+    },
+    "crews": {
+      "label": "title"
+    },
+    "purposes": {
+      "label": "label"
+    },
+    "target_classes": {
+      "label": "title"
+    },
+    "results": {
+      "label": "resultText"
+    },
+    "bbaks": {
+      "label": "title"
+    },
+    "rotas": {
+      "label": "title"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "branding": {
+    "app_name": "Analytics UI",
+    "short_name": "Analytics",
+    "sidebar_title": "ANALYTICS",
+    "sidebar_version": "v0.3 demo"
+  },
+  "routing": {
+    "default_page": "dashboard"
+  },
+  "defaults": {
+    "date_range_days": 7,
+    "calendar_anchor_hour": 12,
+    "density": "comfortable",
+    "animations": true
+  },
+  "query": {
+    "stale_time_ms": 30000,
+    "refetch_on_window_focus": false,
+    "source_status_refetch_ms": 30000,
+    "retry_count": 1
+  },
+  "language": {
+    "default": "uk",
+    "storage_key": "analytics-language",
+    "locales": {
+      "uk": "uk-UA",
+      "en": "en-US"
+    }
+  },
+  "storage": {
+    "density_key": "ui-density",
+    "animations_key": "ui-animations",
+    "saved_views_key": "saved-views"
+  },
+  "special_filters": {
+    "lost_devices_result": "__lost_devices__"
+  }
+}

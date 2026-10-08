@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "max_entries": 128,
+  "stale_if_error_seconds": 900,
+  "copy_on_read": false,
+  "copy_on_write": false,
+  "ttl_seconds": {
+    "filter_options": 300,
+    "overview": 180,
+    "timeline": 180,
+    "events": 60,
+    "map": 180,
+    "source_status": 5,
+    "clickhouse_dataset": 180,
+    "clickhouse_schema": 3600
+  },
+  "warmup": {
+    "filter_options": true
+  },
+  "admin": {
+    "enabled": true,
+    "header": "X-Cache-Admin-Token"
+  },
+  "stale_while_revalidate": true
+}
