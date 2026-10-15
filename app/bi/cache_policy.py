@@ -29,7 +29,7 @@ class CachePolicy:
     hot_ttl_seconds: int = 600
     warm_ttl_seconds: int = 21600
     historical_ttl_seconds: int = 172800
-    raw_max_rows: int = 10000
+    raw_max_rows: int = 100000
 
     @classmethod
     def from_env(cls) -> "CachePolicy":
