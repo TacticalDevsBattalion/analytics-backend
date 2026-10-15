@@ -1,6 +1,8 @@
 """Shared server-side query, metric, KPI and restricted comparison engine."""
 from __future__ import annotations
 
+import base64
+import contextvars
 import json
 import hashlib
 import logging
@@ -8,7 +10,9 @@ import math
 import re
 import time
 import uuid
+import zlib
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -58,6 +62,13 @@ FILTER_OPERATORS = {"eq", "neq", "in", "not_in", "gt", "gte", "lt", "lte", "cont
 AGGREGATIONS = {"COUNT", "COUNT_DISTINCT", "SUM", "AVG", "MIN", "MAX", "RATIO", "FORMULA", "WEIGHTED_SUM"}
 MAX_METRICS = 30
 LOAD_WINDOW_DAYS = 14
+# Independent window and table reads run side by side; a small fixed bound keeps
+# one slow period from occupying ClickHouse or the HTTP pool.
+LOAD_PARALLEL_QUERIES = 4
+# Parent flights of child records dated in the period but linked to a flight
+# outside it are fetched by ID in batches (IDs travel as URL parameters).
+MAX_PARENT_LOOKUPS = 20000
+PARENT_LOOKUP_BATCH = 500
 MAX_DIMENSIONS = 5
 MAX_GROUPS = 10000
 MAX_DEPENDENCIES = 100
@@ -319,6 +330,34 @@ def _enrich(dataset: Mapping[str, list[dict[str, Any]]]) -> dict[str, list[dict[
     return result
 
 
+def _pack_partition(value: dict[str, list[dict[str, Any]]]) -> Any:
+    """Store a daily partition as compressed JSON so a busy day fits one cache value."""
+    try:
+        raw = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        return value
+    return {"zjson": base64.b64encode(zlib.compress(raw, 6)).decode("ascii")}
+
+
+def _unpack_partition(value: Any) -> dict[str, list[dict[str, Any]]]:
+    if isinstance(value, dict) and set(value) == {"zjson"}:
+        return json.loads(zlib.decompress(base64.b64decode(value["zjson"])).decode("utf-8"))
+    return value
+
+
+def _parallel(worker: Callable[[Any], Any], tasks: list[Any]) -> list[Any]:
+    """Run independent reads concurrently and return their results in task order."""
+    if len(tasks) <= 1:
+        return [worker(task) for task in tasks]
+    pool = ThreadPoolExecutor(max_workers=min(LOAD_PARALLEL_QUERIES, len(tasks)), thread_name_prefix="bi-read")
+    try:
+        # Each task gets its own context copy so request ids still reach the logs.
+        futures = [pool.submit(contextvars.copy_context().run, worker, task) for task in tasks]
+        return [future.result() for future in futures]
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def load_clickhouse_rows(start: date, end: date) -> dict[str, list[dict[str, Any]]]:
     """Use the existing transport and mapping; identifiers never come from HTTP."""
     if get_settings().active_source != "clickhouse":
@@ -327,43 +366,60 @@ def load_clickhouse_rows(start: date, end: date) -> dict[str, list[dict[str, Any
     extra_fields.sync()
     from app.services.clickhouse_analytics import clickhouse_analytics, _SqlWhere
 
-    dataset = {}
-    for source, entity in SOURCES.items():
-        keys = sorted(SOURCE_FIELDS[source])
-        date_field = clickhouse_analytics._physical(entity, "date", required=True)
-        rows: list[dict[str, Any]] = []
-        # Long periods are read in bounded windows so a single ClickHouse query or
-        # HTTP response stays well inside the execution-time and memory limits.
-        window_start = start
-        while window_start <= end:
-            window_end = min(end, window_start + timedelta(days=LOAD_WINDOW_DAYS - 1))
-            where = _SqlWhere()
-            where.dates(date_field, window_start, window_end)
-            rows.extend(clickhouse_analytics._query_rows(entity, keys, where))
-            window_start = window_end + timedelta(days=1)
-        dataset[source] = rows
+    # Long periods are read in bounded windows so a single ClickHouse query or
+    # HTTP response stays well inside the execution-time and memory limits.
+    windows = []
+    window_start = start
+    while window_start <= end:
+        window_end = min(end, window_start + timedelta(days=LOAD_WINDOW_DAYS - 1))
+        windows.append((window_start, window_end))
+        window_start = window_end + timedelta(days=1)
+    date_fields = {source: clickhouse_analytics._physical(entity, "date", required=True) for source, entity in SOURCES.items()}
+    tasks = [(source, window) for source in SOURCES for window in windows]
+
+    def read_window(task):
+        source, (window_start, window_end) = task
+        where = _SqlWhere()
+        where.dates(date_fields[source], window_start, window_end)
+        return clickhouse_analytics._query_rows(SOURCES[source], sorted(SOURCE_FIELDS[source]), where)
+
+    dataset = {source: [] for source in SOURCES}
+    for (source, _), rows in zip(tasks, _parallel(read_window, tasks)):
+        dataset[source].extend(rows)
     excluded = set(get_backend_config().analytics.excluded_analytics_purposes)
-    dataset["flights"] = [row for row in dataset["flights"] if row.get("main_purpose") not in excluded]
-    valid_ids = {str(row["flight_id"]) for row in dataset["flights"] if row.get("flight_id") is not None}
+    # Every flight loaded for the period is a known parent, including flights
+    # with an excluded purpose: their children are dropped below, not looked up.
+    valid_ids = {str(row["flight_id"]).strip() for row in dataset["flights"] if row.get("flight_id") is not None}
+    # Excluded flights are never counted, but they still give their losses the
+    # organization of the flight, exactly like a parent read by ID below.
+    dataset["flights"] = [row if row.get("main_purpose") not in excluded else {**row, "_bi_parent_context": True} for row in dataset["flights"]]
     # Child records have their own date, so their parent can be outside a daily
     # partition. Resolve all bounded links before applying hierarchy or purpose.
     # Unmatched losses remain visible to ALL, with NULL organization for viewers.
-    missing_ids = sorted({str(row["flight_id"]) for source in SOURCES.keys() - {"flights"} for row in dataset[source] if row.get("flight_id") is not None and str(row["flight_id"]) not in valid_ids})
-    if len(missing_ids) > 10000:
-        raise QueryError("Too many unmatched child flight links; narrow the date range")
+    missing_ids = sorted({key for source in SOURCES.keys() - {"flights"} for row in dataset[source] if row.get("flight_id") is not None and (key := str(row["flight_id"]).strip()) and key not in valid_ids})
+    if len(missing_ids) > MAX_PARENT_LOOKUPS:
+        # Too many links to resolve cheaply. Skip the lookup instead of failing
+        # the whole query: losses stay visible without organization, and events
+        # and ammunition without a known parent are dropped as before.
+        logger.warning("bi_parent_lookup_skipped unmatched=%s start=%s end=%s", len(missing_ids), start, end)
+        missing_ids = []
     if missing_ids:
         flight_field = clickhouse_analytics._physical("flight_list", "flight_id", required=True)
-        for offset in range(0, len(missing_ids), 500):
+
+        def read_parents(batch):
             where = _SqlWhere()
-            where.strings(flight_field, missing_ids[offset:offset + 500])
+            where.strings(flight_field, batch)
             # This bounded lookup uses only child-linked IDs, never an unfiltered
             # historical flight scan. Outside-period rows supply parent context;
             # _evaluate still filters every metric by its own source row date.
-            parents = clickhouse_analytics._query_rows("flight_list", sorted(SOURCE_FIELDS["flights"]), where)
+            return clickhouse_analytics._query_rows("flight_list", sorted(SOURCE_FIELDS["flights"]), where)
+
+        batches = [missing_ids[offset:offset + PARENT_LOOKUP_BATCH] for offset in range(0, len(missing_ids), PARENT_LOOKUP_BATCH)]
+        for parents in _parallel(read_parents, batches):
             dataset["flights"].extend({**row, "_bi_parent_context": True} for row in parents)
-    included_ids = {str(row["flight_id"]) for row in dataset["flights"] if row.get("flight_id") is not None and row.get("main_purpose") not in excluded}
+    included_ids = {str(row["flight_id"]).strip() for row in dataset["flights"] if row.get("flight_id") is not None and row.get("main_purpose") not in excluded}
     for source in {"events", "ammunition"}:
-        dataset[source] = [row for row in dataset[source] if str(row.get("flight_id")) in included_ids]
+        dataset[source] = [row for row in dataset[source] if str(row.get("flight_id")).strip() in included_ids]
     return dataset
 
 
@@ -610,17 +666,18 @@ class QueryEngine:
         Contiguous misses are read together. Parent enrichment happens before
         partitioning, so a loss retains its historical flight context on hits.
         Scope validation is done by the caller before reaching any cache layer.
+        Partitions hold source rows before any data scope, so one read serves
+        every user; scope and comparison filters apply to the merged result.
         """
         self._check_source()
         start, end = (date.fromisoformat(request["date_range"][key]) for key in ("from", "to"))
         current = self.today()
-        base = self._period_base(request, principal, comparison_context)
-        scope = base["scope"]
+        base = self._period_base()
         partitions: dict[date, dict[str, list[dict[str, Any]]]] = {}
         missing = []
         for day in days(start, end):
             if self.cache_policy.ttl_for_day(day, current):
-                hit, value = cache.probe("bi.period", _canonical({**base, "day": day.isoformat()}), dependency_tags=[f"data:{day}", "dictionary"])
+                hit, value = self._probe_partition(base, day)
                 if hit:
                     partitions[day] = value
                     continue
@@ -632,7 +689,7 @@ class QueryEngine:
             for day in missing:
                 hit = False
                 if self.cache_policy.ttl_for_day(day, current):
-                    hit, value = cache.probe("bi.period", _canonical({**base, "day": day.isoformat()}), dependency_tags=[f"data:{day}", "dictionary"])
+                    hit, value = self._probe_partition(base, day)
                     if hit:
                         partitions[day] = value
                 if not hit:
@@ -647,17 +704,15 @@ class QueryEngine:
                 tags = [f"data:{day}" for day in interval] + ["dictionary"]
                 snapshot = cache.generations(tags, namespace="bi.period")
                 links_snapshot = cache.generations(tags, namespace="bi.period.links")
+                # Any day invalidation bumps data:epoch, so an unchanged epoch after
+                # the read proves no parent day changed while it was in flight.
+                epoch_before = cache.generations(["data:epoch"]).get("data:epoch", 0)
                 started = time.perf_counter()
                 normalized = _enrich(self.row_loader(interval[0], interval[-1]))
-                logger.info("bi_source_read days=%s db_ms=%.2f scope_hash=%s", len(interval), (time.perf_counter() - started) * 1000, hashlib.sha256(_canonical(scope).encode()).hexdigest()[:16])
-                # Cross-day links depend on a parent date outside this partition.
-                # Avoid freezing hierarchy under a child-only generation. These
-                # bounded records are reloaded, and parent tags protect L1/L2.
-                unsafe_days = {_date(row.get("date")) for source, rows in normalized.items() if source != "flights" for row in rows if row.get("flight_id") is not None and _date(row.get("_bi_parent_date")) != _date(row.get("date"))}
-                if principal is not None and comparison_context is None:
-                    normalized = self._apply_scope(normalized, principal, request)
-                elif comparison_context is not None:
-                    normalized = {source: [row for row in rows if matches_filters(row, comparison_context)] for source, rows in normalized.items()}
+                logger.info("bi_source_read days=%s db_ms=%.2f", len(interval), (time.perf_counter() - started) * 1000)
+                # A child without a known parent may still get one when late flight
+                # data arrives, so such days are cached only once they leave the hot band.
+                orphan_days = {_date(row.get("date")) for source, rows in normalized.items() if source != "flights" for row in rows if row.get("flight_id") is not None and not row.get("_bi_parent_date")}
                 split = {day: {source: [] for source in SOURCES} for day in interval}
                 for source, rows in normalized.items():
                     for row in rows:
@@ -667,15 +722,24 @@ class QueryEngine:
                 for day, value in split.items():
                     partitions[day] = value
                     ttl = self.cache_policy.ttl_for_day(day, current)
-                    if ttl and day not in unsafe_days:
-                        tag = f"data:{day}"
-                        expected = {key: revision for key, revision in links_snapshot.items() if key.startswith("__") or key in {tag, "dictionary"}}
-                        parents = sorted({row["_bi_parent_date"] for source, rows in value.items() if source != "flights" for row in rows if row.get("_bi_parent_date")})
-                        cache.put("bi.period.links", _canonical({**base, "day": day.isoformat()}), {"parent_dates": parents}, ttl_seconds=ttl, dependency_tags=[tag, "dictionary"], expected_generations=expected)
-                    if ttl and day not in unsafe_days and sum(len(rows) for rows in value.values()) <= self.cache_policy.raw_max_rows:
-                        tag = f"data:{day}"
+                    if not ttl or (day in orphan_days and (current - day).days <= self.cache_policy.hot_days):
+                        continue
+                    tag = f"data:{day}"
+                    parents = sorted({row["_bi_parent_date"] for source, rows in value.items() if source != "flights" for row in rows if row.get("_bi_parent_date")})
+                    # A child linked to a flight on another day is stored under that
+                    # day's tag too, so correcting the parent day reloads this one.
+                    parent_tags = [f"data:{parent}" for parent in parents if parent != day.isoformat()]
+                    parent_generations = {}
+                    if parent_tags:
+                        parent_generations = cache.generations(parent_tags + ["data:epoch"])
+                        if parent_generations.get("data:epoch", 0) != epoch_before:
+                            continue
+                        parent_generations = {key: revision for key, revision in parent_generations.items() if key in parent_tags}
+                    expected = {key: revision for key, revision in links_snapshot.items() if key.startswith("__") or key in {tag, "dictionary"}}
+                    cache.put("bi.period.links", _canonical({**base, "day": day.isoformat()}), {"parent_dates": parents}, ttl_seconds=ttl, dependency_tags=[tag, "dictionary"], expected_generations=expected)
+                    if sum(len(rows) for rows in value.values()) <= self.cache_policy.raw_max_rows:
                         expected = {key: revision for key, revision in snapshot.items() if key.startswith("__") or key in {tag, "dictionary"}}
-                        cache.put("bi.period", _canonical({**base, "day": day.isoformat()}), value, ttl_seconds=ttl, dependency_tags=[tag, "dictionary"], expected_generations=expected)
+                        cache.put("bi.period", _canonical({**base, "day": day.isoformat()}), _pack_partition(value), ttl_seconds=ttl, dependency_tags=[tag, "dictionary", *parent_tags], expected_generations={**expected, **parent_generations})
             return {day.isoformat(): partitions[day] for day in missing}
 
         if missing:
@@ -684,11 +748,24 @@ class QueryEngine:
             filled = cache.get_or_load("bi.period.fill", _canonical({**base, "missing": [day.isoformat() for day in missing]}), read_missing, ttl_seconds=0, stale_if_error_seconds=0, stale_while_revalidate=False, dependency_tags=[f"data:{day}" for day in missing] + ["dictionary"], shared=True)
             for day in missing:
                 partitions[day] = filled[day.isoformat()]
-        return {source: [row for day in days(start, end) for row in partitions[day].get(source, [])] for source in SOURCES}
+        dataset = {source: [row for day in days(start, end) for row in partitions[day].get(source, [])] for source in SOURCES}
+        if comparison_context is not None:
+            return {source: [row for row in rows if matches_filters(row, comparison_context)] for source, rows in dataset.items()}
+        return self._apply_scope(dataset, principal, request) if principal is not None else dataset
 
-    def _period_base(self, request, principal, comparison_context=None):
-        scope = {"principal": principal.cache_key() if principal else None, "mode": request.get("data_scope", "USER_SCOPE"), "fixed": request.get("fixed_scope"), "comparison_context": comparison_context}
-        return {"source": self.semantic_signature(), "scope": scope, "policy": asdict(self.cache_policy)}
+    def _probe_partition(self, base: dict[str, Any], day: date) -> tuple[bool, Any]:
+        key = _canonical({**base, "day": day.isoformat()})
+        own_tags = [f"data:{day}", "dictionary"]
+        hit, links = cache.probe("bi.period.links", key, dependency_tags=own_tags)
+        if not hit:
+            return False, None
+        parent_tags = [f"data:{parent}" for parent in links["parent_dates"] if parent != day.isoformat()]
+        hit, value = cache.probe("bi.period", key, dependency_tags=own_tags + parent_tags)
+        return (True, _unpack_partition(value)) if hit else (False, None)
+
+    def _period_base(self):
+        # Shared by every user: rows are stored unscoped and filtered per request.
+        return {"source": self.semantic_signature(), "policy": asdict(self.cache_policy)}
 
     @staticmethod
     def _apply_scope(dataset: dict[str, list[dict[str, Any]]], principal: Any, request: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -1125,7 +1202,7 @@ class QueryEngine:
         known_before = cache.generations(known_tags)
         parent_dates = None
         if principal is not None and "_cache_read_epoch" not in request:
-            base, found = self._period_base(request, principal), set()
+            base, found = self._period_base(), set()
             for day in days(start, end):
                 hit, links = cache.probe("bi.period.links", _canonical({**base, "day": day.isoformat()}), dependency_tags=[f"data:{day}", "dictionary"])
                 if not hit:

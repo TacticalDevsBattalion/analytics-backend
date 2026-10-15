@@ -100,13 +100,19 @@ class PeriodCacheTests(unittest.TestCase):
             self.assertEqual(evaluate.call_count, 1)
         self.assertEqual(len(self.calls), 1)
 
-    def test_period_cache_stores_only_assigned_rows_and_separates_peers(self):
+    def test_period_cache_is_shared_but_each_user_sees_only_assigned_rows(self):
         validated = self.engine._validated(query(), self.principal, self.engine._definitions()[0])
         own = self.engine._load(validated, self.principal)
         self.assertEqual({row["bbak_id"] for row in own["flights"]}, {1})
         peer = replace(self.principal, user_id="two", scope=DataScope(scope_type="DEPARTMENT", scope_ids=["2"]))
+        self.assertEqual({row["bbak_id"] for row in self.engine._load(validated, peer)["flights"]}, {2})
         self.assertEqual(self.engine.execute(query(), peer)["rows"][0]["flights"], 1)
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.engine.execute(query(), self.principal)["rows"][0]["flights"], 3)
+        # One source read serves both users; scope is applied after the cache.
+        self.assertEqual(len(self.calls), 1)
+        comparison = self.engine._load(validated, self.principal, comparison_context=[{"field": "department", "operator": "eq", "value": "2"}])
+        self.assertEqual({row["bbak_id"] for row in comparison["flights"]}, {2})
+        self.assertEqual(len(self.calls), 1)
 
     def test_beyond_horizon_executes_direct_and_does_not_return_cached_history(self):
         old = query(start="2025-01-01", end="2025-01-02")
@@ -192,6 +198,47 @@ class PeriodCacheTests(unittest.TestCase):
             engine.execute(req, self.principal)
             engine.execute(req, self.principal)
             self.assertEqual(evaluate.call_count, 2)
+
+    def _loss_engine(self, loss_date="2026-09-03", parent=True):
+        calls = []
+
+        def loader(start, end):
+            calls.append((start, end))
+            flights = [{"flight_id": "old", "date": "2026-08-01", "bbak_id": 1, "rota_id": 11, "crew": "red", "_bi_parent_context": True}] if parent else []
+            return {"flights": flights, "lost_devices": [{"flight_id": "old", "date": loss_date}]}
+
+        engine = QueryEngine(self.store, loader, today=lambda: date(2026, 10, 5))
+        validated = engine._validated(query(start=loss_date, end=loss_date), self.principal, engine._definitions()[0])
+        return engine, validated, calls
+
+    def test_cross_day_child_partition_is_cached_until_parent_day_changes(self):
+        engine, validated, calls = self._loss_engine()
+        first = engine._load(validated, self.principal)
+        second = engine._load(validated, self.principal)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first, second)
+        self.assertEqual(second["lost_devices"][0]["bbak_id"], 1)
+        cache.invalidate_tags(["data:2026-08-01"])
+        engine._load(validated, self.principal)
+        self.assertEqual(len(calls), 2)
+
+    def test_orphan_child_is_cached_only_outside_hot_days(self):
+        engine, validated, calls = self._loss_engine(parent=False)
+        engine._load(validated, self.principal)
+        engine._load(validated, self.principal)
+        self.assertEqual(len(calls), 1)
+        engine, validated, calls = self._loss_engine(loss_date="2026-10-04", parent=False)
+        engine._load(validated, self.principal)
+        engine._load(validated, self.principal)
+        self.assertEqual(len(calls), 2)
+
+    def test_busy_day_is_compressed_into_one_cache_value(self):
+        self.data["flights"] = [{"flight_id": f"f{index}", "date": "2026-09-01", "bbak_id": 1, "rota_id": 11, "crew": "red", "device_type": "A", "is_effective": index % 2 == 0, "main_purpose": "Розвідка", "main_result": "Виконано"} for index in range(8000)]
+        validated = self.engine._validated(query(start="2026-09-01", end="2026-09-01"), self.principal, self.engine._definitions()[0])
+        first = self.engine._load(validated, self.principal)
+        second = self.engine._load(validated, self.principal)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(first, second)
 
     def test_unrelated_day_invalidation_preserves_other_period_and_aggregate(self):
         req = query(("efficiency",), start="2026-09-01", end="2026-09-01")

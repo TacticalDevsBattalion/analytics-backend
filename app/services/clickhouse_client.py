@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import hashlib
+import threading
 import time
 from functools import lru_cache
 from typing import Any
@@ -32,6 +33,7 @@ def quote_identifier(value: str) -> str:
 class ClickHouseClient:
     def __init__(self) -> None:
         self._client: httpx.Client | None = None
+        self._client_lock = threading.Lock()
 
     @property
     def settings(self):
@@ -56,19 +58,21 @@ class ClickHouseClient:
         return s.clickhouse_ca_file.strip() or True
 
     def _http(self) -> httpx.Client:
-        if self._client is None:
-            timeout = httpx.Timeout(
-                CH_CONFIG.http.timeout_seconds,
-                connect=CH_CONFIG.http.connect_timeout_seconds,
-            )
-            self._client = httpx.Client(
-                base_url=self._base_url(),
-                auth=(self.settings.clickhouse_user, self.settings.clickhouse_password),
-                verify=self._verify(),
-                timeout=timeout,
-                headers={"Accept-Encoding": "gzip"},
-            )
-        return self._client
+        # Reads run from several threads; the lock keeps one shared client and pool.
+        with self._client_lock:
+            if self._client is None:
+                timeout = httpx.Timeout(
+                    CH_CONFIG.http.timeout_seconds,
+                    connect=CH_CONFIG.http.connect_timeout_seconds,
+                )
+                self._client = httpx.Client(
+                    base_url=self._base_url(),
+                    auth=(self.settings.clickhouse_user, self.settings.clickhouse_password),
+                    verify=self._verify(),
+                    timeout=timeout,
+                    headers={"Accept-Encoding": "gzip"},
+                )
+            return self._client
 
     def query(
         self,

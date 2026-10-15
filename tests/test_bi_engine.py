@@ -1,11 +1,13 @@
 import copy
 import json
+import threading
+import time
 import unittest
 from dataclasses import replace
 from datetime import date
 from unittest.mock import patch
 
-from app.bi.engine import QueryEngine, QueryError, QueryPermissionError, load_clickhouse_rows
+from app.bi.engine import LOAD_PARALLEL_QUERIES, QueryEngine, QueryError, QueryPermissionError, load_clickhouse_rows
 from app.bi.formula import FormulaError, evaluate_formula, validate_formula
 from app.bi.models import DataScope, KpiDefinition, MetricDefinition, QueryRequest
 from app.bi.security import Principal
@@ -113,7 +115,7 @@ class QueryEngineTests(unittest.TestCase):
         self.assertEqual(self.engine.execute(request(), peer)["rows"][0]["flights"], 1)
         self.store.entities["metrics"][0] = metric("flights", "COUNT", filters=[{"field": "is_effective", "operator": "eq", "value": True}], revision=2)
         self.assertEqual(self.engine.execute(request(), self.principal)["rows"][0]["flights"], 2)
-        self.assertEqual(len(self.calls), 2)  # Revised metric reuses scoped periods.
+        self.assertEqual(len(self.calls), 1)  # Both scopes and the revised metric reuse the shared periods.
 
     def test_ordered_dimensions_and_sort_priority_do_not_collide_in_cache(self):
         a = request(dimensions=[{"field": "category"}, {"field": "team"}])
@@ -280,10 +282,31 @@ class QueryEngineTests(unittest.TestCase):
         with patch("app.bi.engine.get_settings") as settings, patch("app.services.clickhouse_analytics.clickhouse_analytics._physical", return_value="date"), patch("app.services.clickhouse_analytics.clickhouse_analytics._query_rows", return_value=[]) as query:
             settings.return_value.active_source = "clickhouse"
             load_clickhouse_rows(date(2026, 9, 1), date(2026, 9, 30))
-            self.assertEqual(query.call_count, 4)
-            where = query.call_args_list[0].args[2]
-            self.assertIn("{d1:Date}", where.sql())
-            self.assertEqual(where.params, {"d1": "2026-09-01", "d2": "2026-09-30"})
+            # Four sources, each read in 14-day windows: 1-14, 15-28, 29-30.
+            self.assertEqual(query.call_count, 12)
+            # Windows run in parallel, so only their set is fixed, not the call order.
+            windows = sorted((call.args[2].params for call in query.call_args_list if call.args[0] == "flight_list"), key=lambda params: params["d1"])
+            self.assertIn("{d1:Date}", query.call_args_list[0].args[2].sql())
+            self.assertEqual(windows, [{"d1": "2026-09-01", "d2": "2026-09-14"}, {"d1": "2026-09-15", "d2": "2026-09-28"}, {"d1": "2026-09-29", "d2": "2026-09-30"}])
+
+    def test_clickhouse_windows_are_read_in_parallel_and_merged_in_order(self):
+        lock, active, peak = threading.Lock(), [0], [0]
+
+        def query(entity, keys, where):
+            with lock:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(0.02)
+            with lock:
+                active[0] -= 1
+            return [{"flight_id": f"{entity}-{where.params['d1']}", "date": where.params["d1"]}] if entity == "flight_list" else []
+
+        with patch("app.bi.engine.get_settings") as settings, patch("app.bi.engine.get_backend_config") as config, patch("app.bi.extra_fields.sync"), patch("app.services.clickhouse_analytics.clickhouse_analytics._physical", side_effect=lambda entity, field, **kwargs: field), patch("app.services.clickhouse_analytics.clickhouse_analytics._query_rows", side_effect=query):
+            settings.return_value.active_source = "clickhouse"
+            config.return_value.analytics.excluded_analytics_purposes = []
+            rows = load_clickhouse_rows(date(2026, 8, 1), date(2026, 9, 30))
+        self.assertTrue(1 < peak[0] <= LOAD_PARALLEL_QUERIES)
+        self.assertEqual([row["date"] for row in rows["flights"]], ["2026-08-01", "2026-08-15", "2026-08-29", "2026-09-12", "2026-09-26"])
 
     def test_clickhouse_loss_backreference_is_bounded_parameterized_and_never_scans(self):
         calls = []
@@ -299,11 +322,42 @@ class QueryEngineTests(unittest.TestCase):
         with patch("app.bi.engine.get_settings") as settings, patch("app.services.clickhouse_analytics.clickhouse_analytics._physical", side_effect=lambda entity, field, **kwargs: field), patch("app.services.clickhouse_analytics.clickhouse_analytics._query_rows", side_effect=query):
             settings.return_value.active_source = "clickhouse"
             rows = load_clickhouse_rows(date(2026, 9, 1), date(2026, 9, 30))
-            self.assertEqual(len(calls), 5)
+            self.assertEqual(len(calls), 13)
             self.assertEqual(rows["flights"][0]["date"], "2026-08-01")
             self.assertEqual(calls[-1][1].params, {"p1": "old-uuid"})
             self.assertIn("{p1:String}", calls[-1][1].sql())
             self.assertNotIn("old-uuid", calls[-1][1].sql())
+
+    def _load_with(self, flights, children, *, excluded=()):
+        calls = []
+
+        def query(entity, keys, where):
+            calls.append((entity, where))
+            if "d1" not in where.params:
+                return []
+            if where.params["d1"] != "2026-09-01":
+                return []
+            return {"flight_list": flights, "events": children}.get(entity, [])
+
+        with patch("app.bi.engine.get_settings") as settings, patch("app.bi.engine.get_backend_config") as config, patch("app.bi.extra_fields.sync"), patch("app.services.clickhouse_analytics.clickhouse_analytics._physical", side_effect=lambda entity, field, **kwargs: field), patch("app.services.clickhouse_analytics.clickhouse_analytics._query_rows", side_effect=query):
+            settings.return_value.active_source = "clickhouse"
+            config.return_value.analytics.excluded_analytics_purposes = list(excluded)
+            rows = load_clickhouse_rows(date(2026, 9, 1), date(2026, 9, 10))
+        return rows, [entity for entity, where in calls if "d1" not in where.params]
+
+    def test_children_of_excluded_flights_are_not_looked_up(self):
+        flights = [{"flight_id": f"f{i}", "date": "2026-09-02", "main_purpose": "training"} for i in range(20001)]
+        children = [{"flight_id": f"f{i}", "date": "2026-09-02"} for i in range(20001)]
+        rows, lookups = self._load_with(flights, children, excluded=["training"])
+        self.assertEqual(lookups, [])
+        self.assertTrue(all(row["_bi_parent_context"] for row in rows["flights"]))
+        self.assertEqual(rows["events"], [])
+
+    def test_too_many_unmatched_links_skip_lookup_instead_of_failing(self):
+        children = [{"flight_id": f"orphan{i}", "date": "2026-09-02"} for i in range(20001)]
+        rows, lookups = self._load_with([], children)
+        self.assertEqual(lookups, [])
+        self.assertEqual(rows["events"], [])
 
 
 if __name__ == "__main__":
