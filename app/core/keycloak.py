@@ -111,7 +111,7 @@ def consume_state(state: str, browser: str | None) -> tuple[str, str]:
         return row["verifier"], row["nonce"]
 
 
-def validate_id_token(token: str, config: dict[str, str], nonce: str | None) -> dict:
+def _signing_key(token: str, config: dict[str, str]):
     # Never select verification algorithms, issuer or JWKS URLs from token claims.
     with httpx.Client(timeout=15) as client:
         response = client.get(config["issuer"] + "/protocol/openid-connect/certs")
@@ -121,7 +121,34 @@ def validate_id_token(token: str, config: dict[str, str], nonce: str | None) -> 
     candidates = [key for key in keys if key.get("kid") == header.get("kid") and key.get("kty") == "RSA" and key.get("use", "sig") == "sig"]
     if len(candidates) != 1:
         raise jwt.InvalidTokenError("Signing key is unavailable")
-    key = jwt.PyJWK.from_dict(candidates[0], algorithm="RS256")
+    return jwt.PyJWK.from_dict(candidates[0], algorithm="RS256")
+
+
+def token_roles(claims: dict, client_id: str) -> set[str]:
+    """Realm roles and this client's roles."""
+    roles = list(claims.get("realm_access", {}).get("roles", []))
+    roles += claims.get("resource_access", {}).get(client_id, {}).get("roles", [])
+    return {str(role) for role in roles}
+
+
+def access_token_roles(token: object, config: dict[str, str], subject: str) -> set[str]:
+    """Keycloak puts roles into the access token by default, not into the ID token.
+    Its audience is the resource servers, so only signature, issuer, subject and the
+    authorized party (this client) are checked."""
+    if not isinstance(token, str):
+        return set()
+    try:
+        claims = jwt.decode(token, _signing_key(token, config).key, algorithms=["RS256"], issuer=config["issuer"],
+                            options={"verify_aud": False, "require": ["exp", "iss", "sub"]})
+    except (httpx.HTTPError, jwt.PyJWTError, ValueError, KeyError):
+        return set()
+    if str(claims.get("sub")) != subject or claims.get("azp") not in {None, config["client_id"]}:
+        return set()
+    return token_roles(claims, config["client_id"])
+
+
+def validate_id_token(token: str, config: dict[str, str], nonce: str | None) -> dict:
+    key = _signing_key(token, config)
     # The password grant has no browser round trip, so no nonce to bind.
     required = ["exp", "iat", "iss", "aud", "sub"] + (["nonce"] if nonce is not None else [])
     claims = jwt.decode(token, key.key, algorithms=["RS256"], audience=config["client_id"],
@@ -135,14 +162,15 @@ def validate_id_token(token: str, config: dict[str, str], nonce: str | None) -> 
     return claims
 
 
-def establish_session(claims: dict, config: dict[str, str]) -> tuple[str, SessionUser]:
+def establish_session(claims: dict, config: dict[str, str], extra_roles: set[str] = frozenset()) -> tuple[str, SessionUser]:
     subject = str(claims["sub"])
     identity = hashlib.sha256((config["issuer"] + "\0" + subject).encode()).hexdigest()
     user_id = "kc_" + identity
     username = "kc_" + identity[:24]
     display = str(claims.get("name") or claims.get("preferred_username") or username)[:120]
-    realm_roles = claims.get("realm_access", {}).get("roles", [])
-    role = "administrator" if config["admin_role"] and config["admin_role"] in realm_roles else "viewer"
+    roles = {role.casefold() for role in token_roles(claims, config["client_id"]) | set(extra_roles)}
+    is_admin = bool(config["admin_role"]) and config["admin_role"].casefold() in roles
+    role = "administrator" if is_admin else "viewer"
     token = secrets.token_urlsafe(32)
     store = get_user_account_store()
     with store._connection() as connection:
@@ -157,6 +185,10 @@ def establish_session(claims: dict, config: dict[str, str]) -> tuple[str, Sessio
         elif not row["active"]:
             raise AuthenticationFailed("Account is disabled")
         # Application access and local suspension are managed by its administrators.
+        # The Keycloak administrator role promotes on every sign-in but never demotes.
+        if is_admin and row["role"] != "administrator":
+            connection.execute("UPDATE users SET role='administrator' WHERE id=?", (row["id"],))
+            row = connection.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone()
         user_id = row["id"]
         connection.execute("UPDATE users SET display_name=? WHERE id=?", (display, user_id))
         connection.execute("UPDATE account_state SET ever_enabled=1 WHERE id=1")
@@ -175,10 +207,12 @@ def complete_login(code: str, state: str, browser: str | None) -> tuple[str, Ses
         with httpx.Client(timeout=15) as client:
             response = client.post(config["issuer"] + "/protocol/openid-connect/token", data=data)
             response.raise_for_status()
-            token = response.json().get("id_token")
+            answer = response.json()
+        token = answer.get("id_token")
         if not isinstance(token, str):
             raise jwt.InvalidTokenError("ID token is unavailable")
-        return establish_session(validate_id_token(token, config, nonce), config)
+        claims = validate_id_token(token, config, nonce)
+        return establish_session(claims, config, access_token_roles(answer.get("access_token"), config, str(claims["sub"])))
     except (httpx.HTTPError, jwt.PyJWTError, ValueError, KeyError):
         raise HTTPException(401, "Keycloak sign-in could not be verified") from None
 
@@ -213,10 +247,12 @@ def password_login(username: str, password: str, client: str) -> tuple[str, Sess
         raise HTTPException(503, "Password sign-in is not allowed for this Keycloak client")
     try:
         response.raise_for_status()
-        token = response.json().get("id_token")
+        answer = response.json()
+        token = answer.get("id_token")
         if not isinstance(token, str):
             raise jwt.InvalidTokenError("ID token is unavailable")
-        result = establish_session(validate_id_token(token, config, None), config)
+        claims = validate_id_token(token, config, None)
+        result = establish_session(claims, config, access_token_roles(answer.get("access_token"), config, str(claims["sub"])))
     except (httpx.HTTPError, jwt.PyJWTError, ValueError, KeyError):
         raise HTTPException(502, "Keycloak sign-in could not be verified") from None
     store.clear_login_attempts(username)

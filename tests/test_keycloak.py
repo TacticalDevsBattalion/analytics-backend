@@ -158,12 +158,30 @@ class KeycloakTests(KeycloakFixture):
         with self.assertRaises(AuthenticationFailed):
             keycloak.establish_session(self.claims(realm_access={"roles": ["analytics-admin"]}), self.config)
 
-    def test_configured_realm_role_only_sets_role_on_first_registration(self):
-        _, user = keycloak.establish_session(self.claims(sub="new-admin", realm_access={"roles": ["analytics-admin"]}), self.config)
-        self.assertEqual(user.role, "administrator")
-        self.store.update_user(user.id, UpdateUserRequest(role="viewer"))
-        _, again = keycloak.establish_session(self.claims(sub="new-admin", realm_access={"roles": ["analytics-admin"]}), self.config)
-        self.assertEqual(again.role, "viewer")
+    def test_configured_role_promotes_on_every_sign_in_but_never_demotes(self):
+        # An account that signed in before the role was assigned becomes an administrator.
+        _, user = keycloak.establish_session(self.claims(sub="new-admin"), self.config)
+        self.assertEqual(user.role, "viewer")
+        _, promoted = keycloak.establish_session(self.claims(sub="new-admin", realm_access={"roles": ["analytics-admin"]}), self.config)
+        self.assertEqual(promoted.role, "administrator")
+        # Losing the Keycloak role does not remove application rights; administrators manage them.
+        _, kept = keycloak.establish_session(self.claims(sub="new-admin"), self.config)
+        self.assertEqual(kept.role, "administrator")
+
+    def test_role_is_found_in_client_roles_access_token_and_ignores_case(self):
+        _, client_role = keycloak.establish_session(self.claims(sub="client-role", resource_access={"analytics-ui": {"roles": ["Analytics-Admin"]}}), self.config)
+        self.assertEqual(client_role.role, "administrator")
+        _, other_client = keycloak.establish_session(self.claims(sub="other-client", resource_access={"another-app": {"roles": ["analytics-admin"]}}), self.config)
+        self.assertEqual(other_client.role, "viewer")
+        now = int(time.time())
+        access = jwt.encode({"iss": self.config["issuer"], "sub": "from-access", "azp": "analytics-ui", "aud": "account", "iat": now, "exp": now + 300, "realm_access": {"roles": ["analytics-admin"]}}, self.private_key, algorithm="RS256", headers={"kid": "test-key"})
+        self.assertEqual(keycloak.access_token_roles(access, self.config, "from-access"), {"analytics-admin"})
+        # Another subject's or another client's token, or a foreign signature, grants nothing.
+        self.assertEqual(keycloak.access_token_roles(access, self.config, "someone-else"), set())
+        forged = jwt.encode({"iss": self.config["issuer"], "sub": "from-access", "azp": "analytics-ui", "exp": now + 300, "realm_access": {"roles": ["analytics-admin"]}}, self.other_key, algorithm="RS256", headers={"kid": "test-key"})
+        self.assertEqual(keycloak.access_token_roles(forged, self.config, "from-access"), set())
+        foreign = jwt.encode({"iss": self.config["issuer"], "sub": "from-access", "azp": "another-app", "exp": now + 300, "realm_access": {"roles": ["analytics-admin"]}}, self.private_key, algorithm="RS256", headers={"kid": "test-key"})
+        self.assertEqual(keycloak.access_token_roles(foreign, self.config, "from-access"), set())
 
     def test_issuer_namespaces_federated_identity_and_cannot_link_by_display_name(self):
         _, a = keycloak.establish_session(self.claims(name="Same name"), self.config)
@@ -254,9 +272,13 @@ class KeycloakPasswordLoginTests(KeycloakFixture):
     def test_correct_password_creates_a_session_without_a_nonce(self):
         claims = self.claims()
         del claims["nonce"]
-        self.answer(200, {"id_token": self.signed(claims)})
+        now = int(time.time())
+        access = jwt.encode({"iss": self.config["issuer"], "sub": claims["sub"], "azp": "analytics-ui", "exp": now + 300, "realm_access": {"roles": ["analytics-admin"]}}, self.private_key, algorithm="RS256", headers={"kid": "test-key"})
+        self.answer(200, {"id_token": self.signed(claims), "access_token": access})
         token, user = keycloak.password_login("person", "short", "10.0.0.1")
         self.assertEqual(self.store.session_user(token).id, user.id)
+        # The administrator role came only in the access token.
+        self.assertEqual(user.role, "administrator")
         posted = self.http.post.call_args.kwargs["data"]
         self.assertEqual((posted["grant_type"], posted["username"], posted["client_secret"]), ("password", "person", "test-confidential-secret"))
 
