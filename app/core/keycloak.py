@@ -1,4 +1,7 @@
-"""Optional Keycloak OIDC code flow. Tokens stay on the backend."""
+"""Optional Keycloak OIDC sign-in. Tokens stay on the backend.
+
+Two ways in: the application's own form (password grant, the default) and the
+redirect code flow to Keycloak's page, kept for accounts that must finish setup there."""
 from __future__ import annotations
 
 import base64
@@ -24,6 +27,15 @@ LOGIN_COOKIE = "analytics_oidc_login"
 
 def enabled() -> bool:
     return os.environ.get("KEYCLOAK_ENABLED", "").lower() in {"1", "true", "yes"}
+
+
+def password_login_enabled() -> bool:
+    """The client must allow "Direct access grants" in Keycloak."""
+    return enabled() and os.environ.get("KEYCLOAK_PASSWORD_LOGIN", "true").lower() in {"1", "true", "yes"}
+
+
+class SetupRequired(Exception):
+    """Keycloak needs the user to finish account setup (new password, OTP…) on its own page."""
 
 
 def configuration() -> dict[str, str]:
@@ -99,7 +111,7 @@ def consume_state(state: str, browser: str | None) -> tuple[str, str]:
         return row["verifier"], row["nonce"]
 
 
-def validate_id_token(token: str, config: dict[str, str], nonce: str) -> dict:
+def validate_id_token(token: str, config: dict[str, str], nonce: str | None) -> dict:
     # Never select verification algorithms, issuer or JWKS URLs from token claims.
     with httpx.Client(timeout=15) as client:
         response = client.get(config["issuer"] + "/protocol/openid-connect/certs")
@@ -110,9 +122,11 @@ def validate_id_token(token: str, config: dict[str, str], nonce: str) -> dict:
     if len(candidates) != 1:
         raise jwt.InvalidTokenError("Signing key is unavailable")
     key = jwt.PyJWK.from_dict(candidates[0], algorithm="RS256")
+    # The password grant has no browser round trip, so no nonce to bind.
+    required = ["exp", "iat", "iss", "aud", "sub"] + (["nonce"] if nonce is not None else [])
     claims = jwt.decode(token, key.key, algorithms=["RS256"], audience=config["client_id"],
-                        issuer=config["issuer"], options={"require": ["exp", "iat", "iss", "aud", "sub", "nonce"]})
-    if not secrets.compare_digest(str(claims.get("nonce", "")), nonce):
+                        issuer=config["issuer"], options={"require": required})
+    if nonce is not None and not secrets.compare_digest(str(claims.get("nonce", "")), nonce):
         raise jwt.InvalidTokenError("Nonce does not match")
     if claims.get("azp") is not None and claims["azp"] != config["client_id"]:
         raise jwt.InvalidTokenError("Authorized party does not match")
@@ -167,3 +181,43 @@ def complete_login(code: str, state: str, browser: str | None) -> tuple[str, Ses
         return establish_session(validate_id_token(token, config, nonce), config)
     except (httpx.HTTPError, jwt.PyJWTError, ValueError, KeyError):
         raise HTTPException(401, "Keycloak sign-in could not be verified") from None
+
+
+def password_login(username: str, password: str, client: str) -> tuple[str, SessionUser]:
+    """Sign in with the application's own form: the backend checks the password with Keycloak."""
+    config = configuration()
+    if not password_login_enabled():
+        raise HTTPException(404, "Password sign-in is disabled")
+    store = get_user_account_store()
+    store._reserve_login_attempt(username, client)
+    data = {"grant_type": "password", "client_id": config["client_id"], "username": username,
+            "password": password, "scope": "openid profile email"}
+    if config["secret"]:
+        data["client_secret"] = config["secret"]
+    try:
+        with httpx.Client(timeout=15) as http:
+            response = http.post(config["issuer"] + "/protocol/openid-connect/token", data=data)
+    except httpx.HTTPError:
+        raise HTTPException(503, "Keycloak is unavailable") from None
+    if response.status_code in {400, 401}:
+        try:
+            answer = response.json()
+        except ValueError:
+            answer = {}
+        error, description = str(answer.get("error", "")), str(answer.get("error_description", "")).lower()
+        if error == "invalid_grant" and "not fully set up" in description:
+            raise SetupRequired("Account setup must be completed in Keycloak")
+        if error == "invalid_grant":
+            raise AuthenticationFailed("Username or password is incorrect")
+        # unauthorized_client: "Direct access grants" is off for this client.
+        raise HTTPException(503, "Password sign-in is not allowed for this Keycloak client")
+    try:
+        response.raise_for_status()
+        token = response.json().get("id_token")
+        if not isinstance(token, str):
+            raise jwt.InvalidTokenError("ID token is unavailable")
+        result = establish_session(validate_id_token(token, config, None), config)
+    except (httpx.HTTPError, jwt.PyJWTError, ValueError, KeyError):
+        raise HTTPException(502, "Keycloak sign-in could not be verified") from None
+    store.clear_login_attempts(username)
+    return result

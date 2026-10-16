@@ -269,7 +269,7 @@ class WidgetPermissions(BiModel):
 class WidgetInteraction(BiModel):
     click_action: Literal['NONE', 'CROSS_FILTER', 'DRILL_THROUGH'] = 'NONE'
     target_page: Literal['STATISTICS', 'DASHBOARD', 'MAP', 'TABLE'] = 'STATISTICS'
-    target_section: Literal['overview', 'effectiveness', 'targets', 'losses', 'resources'] = 'overview'
+    target_section: Literal['overview', 'effectiveness', 'targets', 'losses', 'resources', 'positions'] = 'overview'
     pass_date: bool = True
     pass_filters: bool = True
 
@@ -309,7 +309,7 @@ class WidgetDefinition(VersionedEntity):
     movable: bool = True
     resizable: bool = True
     removable: bool = True
-    section: Literal['overview', 'effectiveness', 'targets', 'losses', 'resources'] = 'overview'
+    section: Literal['overview', 'effectiveness', 'targets', 'losses', 'resources', 'positions'] = 'overview'
 
     @model_validator(mode="after")
     def fixed_configuration(self):

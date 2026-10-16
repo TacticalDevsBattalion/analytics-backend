@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from app.bi.engine import seed_default_metrics
-from app.bi.models import DashboardDefinition, WidgetDefinition
+from app.bi.models import DashboardDefinition, SortField, WidgetDefinition
 
 BOOTSTRAP_VERSION = 2
 _V1_METRICS = frozenset({'flights', 'effective', 'efficiency', 'events', 'ammunition', 'lost_devices', 'weighted_result'})
@@ -34,6 +34,31 @@ def _widget(identifier, title, keys, *, builtin=None, visualization='table', dim
     )
 
 
+_RESULT_KEYS = ['affected', 'destroyed', 'target_results', 'target_detected']
+# The overview widgets take rows 7–30, directly below the department overview.
+_OVERVIEW_TOP, _OVERVIEW_HEIGHT = 7, 24
+
+
+def _overview_widgets():
+    # Statistics overview: flights and results by corps (direction) and by responsibility zone.
+    return [
+        _widget('stats-overview-flights-direction', 'Вильоти за напрямками (АК)', ['flights'], dimensions=['direction'], visualization='bar', layout={'x': 0, 'y': 7, 'w': 4, 'h': 7}, cross_filter=True),
+        _widget('stats-overview-flights-zone', 'Вильоти за зонами відповідальності', ['zone_flights'], dimensions=['zone'], visualization='horizontal_bar', layout={'x': 4, 'y': 7, 'w': 8, 'h': 9}, cross_filter=True),
+        _widget('stats-overview-results-direction', 'Ураження ОС і цілей за АК', _RESULT_KEYS, dimensions=['direction'], layout={'x': 0, 'y': 16, 'w': 12, 'h': 5}, cross_filter=True),
+        _widget('stats-overview-results-zone', 'Ураження ОС і цілей за зонами відповідальності', _RESULT_KEYS, dimensions=['zone'], layout={'x': 0, 'y': 21, 'w': 12, 'h': 10}, cross_filter=True),
+    ]
+
+
+def _position_widgets(top):
+    # Statistics "Positions": who flew how much by day and night, per position.
+    table = _widget('stats-positions-table', 'Позиції: вильоти вдень і вночі', ['flights', 'day_flights', 'night_flights', 'efficiency'], dimensions=['category', 'bbak_title', 'position', 'team'], section='positions', layout={'x': 0, 'y': top + 6, 'w': 12, 'h': 14}, cross_filter=True)
+    table.query.sort = [SortField(field='flights', direction='desc')]
+    return [
+        _widget('stats-positions-category', 'Вильоти вдень і вночі за кафедрами', ['day_flights', 'night_flights'], dimensions=['category'], visualization='stacked_bar', section='positions', layout={'x': 0, 'y': top, 'w': 12, 'h': 6}, cross_filter=True),
+        table,
+    ]
+
+
 def _pages(configuration):
     main = []
     for index, key in enumerate(configuration.metric_keys):
@@ -58,6 +83,8 @@ def _pages(configuration):
             column = row_height = 0
         main.append(_widget(f'main-{identifier}', title, keys, builtin=builtin, visualization=visualization, section=section,
                             layout={'x': column, 'y': row, 'w': width, 'h': height}, options={'legacy_block': block}))
+        if identifier == 'timeline':
+            main[-1].interaction.target_section = 'positions'  # A clicked day opens its positions.
         column += width
         row_height = max(row_height, height)
         if column == 12:
@@ -75,6 +102,11 @@ def _pages(configuration):
         _widget('stats-losses', 'Втрати засобів', ['lost_devices'], builtin='losses', section='losses', layout={'x': 0, 'y': 32, 'w': 12, 'h': 8}),
         _widget('stats-resources', 'Витрати боєприпасів', ['ammunition'], dimensions=['category'], section='resources', layout={'x': 0, 'y': 40, 'w': 12, 'h': 6}, cross_filter=True),
     ]
+    for widget in statistics:
+        if widget.layout.y >= _OVERVIEW_TOP:
+            widget.layout.y += _OVERVIEW_HEIGHT
+    statistics[1:1] = _overview_widgets()
+    statistics += _position_widgets(max(widget.layout.y + widget.layout.h for widget in statistics))
     return [
         DashboardDefinition(id='system-dashboard', name='Центральний Dashboard', slug='central-dashboard', layout_mode='CUSTOMIZABLE', widgets=main),
         DashboardDefinition(id='system-statistics', name='Statistics', slug='statistics', type='STATISTICS', layout_mode='LAYOUT_EDITABLE', widgets=statistics),
@@ -180,6 +212,106 @@ def bootstrap_success_semantics(store):
         connection.execute('INSERT INTO bi_bootstrap_versions VALUES (?,?)', (3, store._now()))
 
 
+def bootstrap_metric_texts(store):
+    """Replace the old built-in metric titles/descriptions once; keep edited ones."""
+    from app.bi.engine import default_metric_definitions
+    from app.bi.metric_texts import updated_texts
+    builtin_ids = {metric.key: metric.id for metric in default_metric_definitions()}
+    with store._connection() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        if connection.execute('SELECT 1 FROM bi_bootstrap_versions WHERE version=5').fetchone():
+            return
+        for row in connection.execute('SELECT * FROM metric_definitions').fetchall():
+            current = store._decode('metrics', row, connection)
+            # Only built-in records; an administrator's own metric may reuse a key.
+            if current.id != builtin_ids.get(current.key):
+                continue
+            changes = updated_texts(current.key, current.title, current.description)
+            if changes:
+                store._save_record(connection, 'metrics', current.model_copy(update=changes), current.revision)
+        # Version 5: version 4 skipped built-ins whose ids differ from their keys.
+        connection.execute('INSERT INTO bi_bootstrap_versions VALUES (?,?)', (5, store._now()))
+
+
+def bootstrap_overview_widgets(store):
+    """Add the zone/corps overview metrics and widgets once; never re-add deleted ones."""
+    from app.bi.engine import default_metric_definitions
+    with store._connection() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        if connection.execute('SELECT 1 FROM bi_bootstrap_versions WHERE version=6').fetchone():
+            return
+        for metric in default_metric_definitions():
+            if metric.key in {'zone_flights', 'target_detected'} and not connection.execute('SELECT 1 FROM metric_definitions WHERE metric_key=? OR id=?', (metric.key, metric.id)).fetchone():
+                store._save_record(connection, 'metrics', metric, 0)
+        # Only next to the stock overview; a page an administrator rebuilt is left alone.
+        if connection.execute("SELECT 1 FROM dashboard_widgets WHERE id='stats-overview-category' AND dashboard_id='system-statistics'").fetchone():
+            missing = [widget for widget in _overview_widgets() if not connection.execute('SELECT 1 FROM dashboard_widgets WHERE id=?', (widget.id,)).fetchone()]
+            if missing:
+                # Make room: everything at or below the insertion row moves down.
+                for row in connection.execute("SELECT * FROM dashboard_widgets WHERE dashboard_id='system-statistics'").fetchall():
+                    current = store._decode('widgets', row, connection)
+                    if current.layout.y >= _OVERVIEW_TOP:
+                        moved = current.model_copy(deep=True)
+                        moved.layout.y += _OVERVIEW_HEIGHT
+                        store._save_record(connection, 'widgets', moved, current.revision)
+            for widget in missing:
+                store._save_record(connection, 'widgets', widget.model_copy(update={'dashboard_id': 'system-statistics'}), 0)
+        connection.execute('INSERT INTO bi_bootstrap_versions VALUES (?,?)', (6, store._now()))
+
+
+def bootstrap_ammunition_spending(store):
+    """Count ammunition only on strike and mining flights; keep edited calculations."""
+    from app.bi.engine import default_metric_definitions
+    from app.bi.metric_texts import updated_texts
+    from app.bi.reports import _calculation_fields
+    template = next(metric for metric in default_metric_definitions() if metric.key == 'ammunition')
+    legacy = template.model_copy(update={'filters': []})
+    with store._connection() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        if connection.execute('SELECT 1 FROM bi_bootstrap_versions WHERE version=7').fetchone():
+            return
+        row = connection.execute('SELECT * FROM metric_definitions WHERE id=?', (template.id,)).fetchone()
+        if row is not None:
+            current = store._decode('metrics', row, connection)
+            changes = updated_texts(current.key, current.title, current.description)
+            if _calculation_fields(current.model_dump(mode='json')) == _calculation_fields(legacy.model_dump(mode='json')):
+                changes['filters'] = template.filters
+            if changes:
+                store._save_record(connection, 'metrics', current.model_copy(update=changes), current.revision)
+        connection.execute('INSERT INTO bi_bootstrap_versions VALUES (?,?)', (7, store._now()))
+
+
+def bootstrap_positions(store):
+    """Add the "Positions" statistics section once; the dashboard timeline opens it."""
+    from app.bi.engine import default_metric_definitions
+    with store._connection() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        if connection.execute('SELECT 1 FROM bi_bootstrap_versions WHERE version=8').fetchone():
+            return
+        for metric in default_metric_definitions():
+            if metric.key in {'day_flights', 'night_flights'} and not connection.execute('SELECT 1 FROM metric_definitions WHERE metric_key=? OR id=?', (metric.key, metric.id)).fetchone():
+                store._save_record(connection, 'metrics', metric, 0)
+        # Only next to the stock statistics; a page an administrator rebuilt is left alone.
+        if connection.execute("SELECT 1 FROM dashboard_widgets WHERE id='stats-overview-category' AND dashboard_id='system-statistics'").fetchone():
+            rows = connection.execute("SELECT * FROM dashboard_widgets WHERE dashboard_id='system-statistics'").fetchall()
+            bottom = max((store._decode('widgets', row, connection).layout for row in rows), key=lambda layout: layout.y + layout.h, default=None)
+            for widget in _position_widgets(bottom.y + bottom.h if bottom else 0):
+                if not connection.execute('SELECT 1 FROM dashboard_widgets WHERE id=?', (widget.id,)).fetchone():
+                    store._save_record(connection, 'widgets', widget.model_copy(update={'dashboard_id': 'system-statistics'}), 0)
+        # A click on a day of the stock timeline opens the positions of that day.
+        row = connection.execute("SELECT * FROM dashboard_widgets WHERE id='main-timeline'").fetchone()
+        if row is not None:
+            timeline = store._decode('widgets', row, connection)
+            action = timeline.interaction
+            if action and action.click_action == 'DRILL_THROUGH' and (action.target_page or 'STATISTICS') == 'STATISTICS' and action.target_section == 'overview':
+                store._save_record(connection, 'widgets', timeline.model_copy(update={'interaction': action.model_copy(update={'target_section': 'positions'})}), timeline.revision)
+        connection.execute('INSERT INTO bi_bootstrap_versions VALUES (?,?)', (8, store._now()))
+
+
 def bootstrap(store):
     _bootstrap_pages(store)
     bootstrap_success_semantics(store)
+    bootstrap_metric_texts(store)
+    bootstrap_overview_widgets(store)
+    bootstrap_ammunition_spending(store)
+    bootstrap_positions(store)

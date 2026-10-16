@@ -45,7 +45,17 @@ class SemanticMetricTests(unittest.TestCase):
     def special(self):
         self.store.save("category_weights", CategoryWeight(category="ОС", weight=10, display_separately=True, include_in_general_total=False, include_in_weighted_total=False))
 
-    def test_target_flight_ratios_follow_actual_result_links_and_category(self):
+    def test_all_areas_overview_groups_by_area_and_keeps_user_scope(self):
+        # The comparison page's "all areas" view relies on one grouped query per level.
+        everyone = Principal("all", "viewer", frozenset({"*"}), DataScope(scope_type="ALL"), "EXACT")
+        for field, expected in (("department_id", {"1", "2"}), ("team_id", {"B01", "B12", "Bomber", "Peer"}), ("category", {"FPV", "Бомбери"})):
+            with self.subTest(field=field):
+                rows = self.engine.execute(self.query(["flights"], dimensions=[{"field": field}]), everyone)["rows"]
+                self.assertEqual({str(row[field]) for row in rows}, expected)
+        scoped = self.engine.execute(self.query(["flights"], dimensions=[{"field": "department_id"}]), self.principal)["rows"]
+        self.assertEqual({str(row["department_id"]) for row in scoped}, {"1"})
+
+
         self.special()
         result = self.engine.execute(self.query(["target_affected", "target_destroyed", "target_results", "flights_per_affected", "flights_per_destroyed", "flights_per_result", "targets"], dimensions=[{"field": "target_type"}]), self.principal)
         tank = result["rows"][0]
@@ -55,6 +65,31 @@ class SemanticMetricTests(unittest.TestCase):
         fpv = self.engine.execute(self.query(["target_results", "flights_per_result"], filters=[{"field": "category", "operator": "eq", "value": "FPV"}], dimensions=[{"field": "target_type"}]), self.principal)
         self.assertEqual(fpv["rows"][0]["target_results"], 3)
         self.assertAlmostEqual(fpv["rows"][0]["flights_per_result"], 2 / 3)
+
+    def test_day_and_night_flights_use_the_configured_day_period(self):
+        # Kyiv day period is 07:00–19:00; a flight without a time counts as night, as on the timeline.
+        for row, clock in zip(self.dataset["flights"], ("2026-09-01 06:59", "2026-09-01 07:00", "2026-09-01 18:59", "2026-09-01 19:00", None)):
+            row["time_range"] = clock
+            row["position"] = "Сокіл" if row["flight_id"] in {"a", "b"} else "Яр"
+        everyone = Principal("all", "viewer", frozenset({"*"}), DataScope(scope_type="ALL"), "EXACT")
+        rows = self.engine.execute(self.query(["flights", "day_flights", "night_flights"], dimensions=[{"field": "position"}]), everyone)["rows"]
+        self.assertEqual({row["position"]: (row["flights"], row["day_flights"], row["night_flights"]) for row in rows}, {"Сокіл": (2, 1, 1), "Яр": (3, 1, 2)})
+
+    def test_ammunition_spending_counts_only_strike_and_mining_flights(self):
+        self.dataset["flights"][0]["main_purpose"] = "Динамічне ураження"
+        self.dataset["flights"][1]["main_purpose"] = "Мінування"
+        self.dataset["flights"][2]["main_purpose"] = "Доставка"
+        self.dataset["ammunition"] += [
+            {"flight_id": "a", "date": "2026-09-01", "bc_name": "ОГ-Б1", "bc_count": 2},
+            {"flight_id": "a", "date": "2026-09-01", "bc_name": " відстань ", "bc_count": 900},
+            {"flight_id": "a", "date": "2026-09-01", "bc_name": "Вага", "bc_count": 5},
+            {"flight_id": "a", "date": "2026-09-01", "bc_name": "Майно позиції", "bc_count": 3},
+            {"flight_id": "b", "date": "2026-09-01", "bc_name": "ПОМ К-2", "bc_count": 4},
+            # Delivery cargo is not spending, even when it is ammunition.
+            {"flight_id": "c", "date": "2026-09-01", "bc_name": "БК", "bc_count": 50},
+        ]
+        result = self.engine.execute(self.query(["ammunition", "detected"]), self.principal)
+        self.assertEqual(result["rows"], [{"ammunition": 6, "detected": 7}])
 
     def test_legacy_personnel_cards_and_detected_remain_distinct_from_target_counts(self):
         self.special()

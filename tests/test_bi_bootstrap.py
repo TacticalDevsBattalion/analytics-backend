@@ -58,7 +58,7 @@ class BiBootstrapTests(unittest.TestCase):
         dashboards = self.store.list("dashboards")
         self.assertEqual({item.type for item in dashboards}, {"DASHBOARD", "STATISTICS"})
         self.assertEqual(len(dashboards), 2)
-        self.assertEqual(len(self.store.list("widgets")), 19)
+        self.assertEqual(len(self.store.list("widgets")), 25)
         self.assertEqual(self.store.get('dashboards', 'system-dashboard').layout_mode, 'CUSTOMIZABLE')
         self.assertEqual(self.store.get('dashboards', 'system-statistics').layout_mode, 'LAYOUT_EDITABLE')
         for dashboard in dashboards:
@@ -75,7 +75,7 @@ class BiBootstrapTests(unittest.TestCase):
         targets = self.store.get('widgets', 'target-total')
         self.assertEqual(targets.visualization.type, 'total_with_highlight')
         self.assertEqual([item.key for item in targets.query.metrics], ['target_results', 'target_destroyed'])
-        self.assertEqual({item.section for item in self.store.get('dashboards', 'system-statistics').widgets}, {'overview', 'effectiveness', 'targets', 'losses', 'resources'})
+        self.assertEqual({item.section for item in self.store.get('dashboards', 'system-statistics').widgets}, {'overview', 'effectiveness', 'targets', 'losses', 'resources', 'positions'})
         with self.store._connection() as connection:
             payloads = [json.loads(row[0]) for row in connection.execute("SELECT definition_json FROM dashboards")]
             self.assertTrue(all(payload["widgets"] == [] for payload in payloads))
@@ -197,7 +197,7 @@ class BiBootstrapTests(unittest.TestCase):
         self.assertNotIn(override.id, {item.id for item in self.store.list('overrides')})
         self.assertEqual(self.store.get('dashboards', 'system-dashboard').layout_mode, 'CUSTOMIZABLE')
         self.assertEqual(self.store.get('dashboards', 'system-statistics').layout_mode, 'LAYOUT_EDITABLE')
-        self.assertEqual(len(self.store.list('widgets')), 19)
+        self.assertEqual(len(self.store.list('widgets')), 25)
 
     def test_upgrade_retains_edited_widgets_layouts_parent_assignments_and_locked_policy(self):
         self.install_v1()
@@ -272,8 +272,117 @@ class BiBootstrapTests(unittest.TestCase):
         with self.store._connection() as connection:
             self.assertIsNone(connection.execute('SELECT 1 FROM bi_bootstrap_versions WHERE version=2').fetchone())
         bootstrap(self.store)
-        self.assertEqual(len(self.store.list('widgets')), 19)
+        self.assertEqual(len(self.store.list('widgets')), 25)
 
+
+    def test_old_builtin_metric_texts_are_replaced_once_and_edits_are_kept(self):
+        from app.bi.bootstrap import bootstrap_metric_texts
+        from app.bi.metric_texts import LEGACY_METRIC_TEXTS, METRIC_TEXTS
+        # An existing installation still carrying the texts shipped before.
+        for metric in seed_default_metrics_with_legacy_texts():
+            self.store.save("metrics", metric)
+        edited = self.store.find_by_key("metrics", "flights")
+        self.store.save("metrics", edited.model_copy(update={"title": "Мої вильоти"}), expected_revision=edited.revision)
+        bootstrap_metric_texts(self.store)
+        efficiency = self.store.find_by_key("metrics", "efficiency")
+        self.assertEqual((efficiency.title, efficiency.description), METRIC_TEXTS["efficiency"])
+        # Built-ins whose stable id differs from the key are updated too.
+        self.assertEqual(self.store.find_by_key("metrics", "lost_devices").title, METRIC_TEXTS["lost_devices"][0])
+        self.assertEqual(self.store.find_by_key("metrics", "weighted_result").description, METRIC_TEXTS["weighted_result"][1])
+        flights = self.store.find_by_key("metrics", "flights")
+        self.assertEqual(flights.title, "Мої вильоти")  # administrator edit kept
+        self.assertEqual(flights.description, METRIC_TEXTS["flights"][1])  # untouched empty description filled
+        self.assertEqual(efficiency.numerator, "effective")  # calculation unchanged
+        revision = efficiency.revision
+        bootstrap_metric_texts(self.store)
+        self.assertEqual(self.store.find_by_key("metrics", "efficiency").revision, revision)
+        # Metrics added after the old texts have no legacy entry.
+        self.assertLessEqual(set(LEGACY_METRIC_TEXTS), set(METRIC_TEXTS))
+
+
+def seed_default_metrics_with_legacy_texts():
+    from app.bi.engine import default_metric_definitions
+    from app.bi.metric_texts import LEGACY_METRIC_TEXTS
+    return [metric.model_copy(update=dict(zip(("title", "description"), LEGACY_METRIC_TEXTS[metric.key]))) if metric.key in LEGACY_METRIC_TEXTS else metric for metric in default_metric_definitions()]
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OverviewWidgetsTests(unittest.TestCase):
+    def test_overview_widgets_are_added_once_and_deleted_ones_stay_deleted(self):
+        import tempfile, os
+        from app.bi.store import BiStore
+        from app.bi.bootstrap import bootstrap
+        with tempfile.TemporaryDirectory() as directory:
+            store = BiStore(os.path.join(directory, "bi.sqlite3"))
+            bootstrap(store)
+            widgets = {item.id: item for item in store.get("dashboards", "system-statistics").widgets}
+            for identifier in ("stats-overview-flights-direction", "stats-overview-flights-zone", "stats-overview-results-direction", "stats-overview-results-zone"):
+                self.assertEqual(widgets[identifier].section, "overview")
+            self.assertEqual([item.key for item in widgets["stats-overview-results-zone"].query.metrics], ["affected", "destroyed", "target_results", "target_detected"])
+            self.assertEqual(widgets["stats-overview-flights-zone"].query.metrics[0].key, "zone_flights")
+            self.assertIsNotNone(store.find_by_key("metrics", "target_detected"))
+            store.delete("widgets", "stats-overview-flights-zone", widgets["stats-overview-flights-zone"].revision)
+            bootstrap(store)
+            self.assertNotIn("stats-overview-flights-zone", {item.id for item in store.get("dashboards", "system-statistics").widgets})
+
+
+class AmmunitionSpendingTests(unittest.TestCase):
+    def install(self, directory, **changes):
+        import os
+        store = BiStore(os.path.join(directory, "bi.sqlite3"))
+        bootstrap(store)
+        metric = store.find_by_key("metrics", "ammunition")
+        # The state before version 7: every record of the table, old texts.
+        old = metric.model_copy(update={"filters": [], "title": "Сума за таблицею БК", "description": "Сума поля «кількість» по всіх записах таблиці боєприпасів. Увага: таблиця містить не лише боєприпаси, а й записи «відстань», «вага», «виявлено», тому сума не відповідає реальній витраті БК.", **changes})
+        store.save("metrics", old, metric.revision)
+        with store._connection() as connection:
+            connection.execute("DELETE FROM bi_bootstrap_versions WHERE version=7")
+        bootstrap(store)
+        return store.find_by_key("metrics", "ammunition")
+
+    def test_stock_calculation_is_limited_to_strike_and_mining_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            metric = self.install(directory)
+            self.assertEqual([item.field for item in metric.filters], ["main_purpose", "norm_bc_name"])
+            self.assertIn("Мінування", metric.filters[0].value)
+            self.assertEqual(metric.title, "Витрати боєприпасів")
+
+    def test_edited_calculation_and_texts_are_kept(self):
+        edited = [QueryFilter(field="norm_bc_name", operator="neq", value="вага")]
+        with tempfile.TemporaryDirectory() as directory:
+            metric = self.install(directory, filters=edited, title="Мій БК")
+            self.assertEqual(metric.filters, edited)
+            self.assertEqual(metric.title, "Мій БК")
+
+
+class PositionsTests(unittest.TestCase):
+    def test_positions_section_is_added_once_and_timeline_opens_it(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            store = BiStore(os.path.join(directory, "bi.sqlite3"))
+            bootstrap(store)
+            widgets = {item.id: item for item in store.get("dashboards", "system-statistics").widgets}
+            table = widgets["stats-positions-table"]
+            self.assertEqual(table.section, "positions")
+            self.assertEqual([item.field for item in table.query.dimensions], ["category", "bbak_title", "position", "team"])
+            self.assertEqual([item.key for item in table.query.metrics], ["flights", "day_flights", "night_flights", "efficiency"])
+            self.assertIsNotNone(store.find_by_key("metrics", "night_flights"))
+            self.assertEqual(store.get("widgets", "main-timeline").interaction.target_section, "positions")
+            # A deleted widget is not restored.
+            store.delete("widgets", table.id, table.revision)
+            bootstrap(store)
+            self.assertNotIn("stats-positions-table", {item.id for item in store.get("dashboards", "system-statistics").widgets})
+
+    def test_edited_timeline_click_is_kept(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            store = BiStore(os.path.join(directory, "bi.sqlite3"))
+            bootstrap(store)
+            timeline = store.get("widgets", "main-timeline")
+            store.save("widgets", timeline.model_copy(update={"interaction": timeline.interaction.model_copy(update={"target_section": "targets"})}), timeline.revision)
+            with store._connection() as connection:
+                connection.execute("DELETE FROM bi_bootstrap_versions WHERE version=8")
+            bootstrap(store)
+            self.assertEqual(store.get("widgets", "main-timeline").interaction.target_section, "targets")

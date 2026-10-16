@@ -115,6 +115,12 @@ class DashboardUpdate(AccountModel):
     preferences: PersonalDashboardPreferences | None
 
 
+class KeycloakLoginRequest(AccountModel):
+    # Keycloak applies its own password policy; usernames may be e-mail addresses.
+    username: str = Field(min_length=1, max_length=255)
+    password: SecretStr = Field(min_length=1, max_length=1024)
+
+
 class LoginRequest(AccountModel):
     username: str = Field(min_length=1, max_length=64)
     password: SecretStr
@@ -299,6 +305,10 @@ class UserAccountStore:
                     raise LoginRateLimited("Sign-in is temporarily unavailable; try again later")
             for scope, _ in scopes:
                 connection.execute("INSERT INTO login_attempts VALUES (?,?,1) ON CONFLICT(scope) DO UPDATE SET attempts=attempts+1", (scope, now))
+
+    def clear_login_attempts(self, username: str) -> None:
+        with self._connection() as connection:
+            connection.execute("DELETE FROM login_attempts WHERE scope=?", (token_digest("account:" + normalize_username(username)),))
 
     def login(self, username: str, password: str, client: str) -> tuple[str, SessionUser]:
         self._reserve_login_attempt(username, client)

@@ -23,7 +23,7 @@ from app.core.user_accounts import (
 )
 
 
-class KeycloakTests(unittest.TestCase):
+class KeycloakFixture(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -63,6 +63,7 @@ class KeycloakTests(unittest.TestCase):
         query = parse_qs(urlsplit(url).query)
         return url, query, browser
 
+class KeycloakTests(KeycloakFixture):
     def test_authorization_code_uses_pkce_browser_bound_state_and_nonce(self):
         url, query, browser = self.begin()
         self.assertEqual(query["code_challenge_method"], ["S256"])
@@ -178,7 +179,7 @@ class KeycloakTests(unittest.TestCase):
         app.include_router(router, prefix="/api")
         with TestClient(app) as client:
             provider = client.get("/api/auth/provider")
-            self.assertEqual(provider.json(), {"provider": "keycloak", "login_url": "/api/auth/keycloak/login"})
+            self.assertEqual(provider.json(), {"provider": "keycloak", "login_url": "/api/auth/keycloak/login", "password_login": True})
             self.assertNotIn("test-confidential-secret", provider.text)
             started = client.get("/api/auth/keycloak/login", follow_redirects=False)
             self.assertEqual(started.status_code, 302)
@@ -225,6 +226,8 @@ class KeycloakTests(unittest.TestCase):
         self.http.post.assert_not_called()
 
     def test_logout_ends_keycloak_session_through_rp_initiated_logout(self):
+        # Only with the redirect sign-in; the own form never opens a Keycloak browser session.
+        self.enterContext(patch.dict(os.environ, {"KEYCLOAK_PASSWORD_LOGIN": "false"}))
         from app.api.account_routes import router as account_router
         app = FastAPI()
         app.include_router(account_router, prefix="/api")
@@ -235,6 +238,99 @@ class KeycloakTests(unittest.TestCase):
             self.assertEqual(url.scheme + "://" + url.netloc + url.path, self.config["issuer"] + "/protocol/openid-connect/logout")
             self.assertEqual(parse_qs(url.query), {"client_id": ["analytics-ui"], "post_logout_redirect_uri": [self.config["frontend"]]})
             self.assertNotIn("test-confidential-secret", response.text)
+
+
+
+class KeycloakPasswordLoginTests(KeycloakFixture):
+    """The application's own sign-in form; Keycloak checks the password."""
+
+    def answer(self, status, body):
+        response = MagicMock(status_code=status)
+        response.json.return_value = body
+        if status >= 400:
+            response.raise_for_status.side_effect = keycloak.httpx.HTTPStatusError("error", request=MagicMock(), response=response)
+        self.http.post.return_value = response
+
+    def test_correct_password_creates_a_session_without_a_nonce(self):
+        claims = self.claims()
+        del claims["nonce"]
+        self.answer(200, {"id_token": self.signed(claims)})
+        token, user = keycloak.password_login("person", "short", "10.0.0.1")
+        self.assertEqual(self.store.session_user(token).id, user.id)
+        posted = self.http.post.call_args.kwargs["data"]
+        self.assertEqual((posted["grant_type"], posted["username"], posted["client_secret"]), ("password", "person", "test-confidential-secret"))
+
+    def test_token_signed_by_another_key_is_rejected(self):
+        self.answer(200, {"id_token": jwt.encode(self.claims(), self.other_key, algorithm="RS256", headers={"kid": "test-key"})})
+        with self.assertRaises(HTTPException) as raised:
+            keycloak.password_login("person", "secret", "10.0.0.1")
+        self.assertEqual(raised.exception.status_code, 502)
+
+    def test_wrong_password_setup_and_disabled_grant_are_distinguished(self):
+        self.answer(401, {"error": "invalid_grant", "error_description": "Invalid user credentials"})
+        with self.assertRaises(AuthenticationFailed):
+            keycloak.password_login("person", "wrong", "10.0.0.1")
+        self.answer(400, {"error": "invalid_grant", "error_description": "Account is not fully set up"})
+        with self.assertRaises(keycloak.SetupRequired):
+            keycloak.password_login("person", "secret", "10.0.0.1")
+        self.answer(400, {"error": "unauthorized_client", "error_description": "Client not allowed for direct access grants"})
+        with self.assertRaises(HTTPException) as raised:
+            keycloak.password_login("person", "secret", "10.0.0.1")
+        self.assertEqual(raised.exception.status_code, 503)
+
+    def test_attempts_are_rate_limited_before_reaching_keycloak(self):
+        from app.core.user_accounts import LoginRateLimited
+        self.answer(401, {"error": "invalid_grant"})
+        with self.assertRaises(LoginRateLimited):
+            for _ in range(100):
+                try:
+                    keycloak.password_login("person", "wrong", "10.0.0.1")
+                except AuthenticationFailed:
+                    pass
+        calls = self.http.post.call_count
+        with self.assertRaises(LoginRateLimited):
+            keycloak.password_login("person", "right", "10.0.0.1")
+        self.assertEqual(self.http.post.call_count, calls)
+
+    def test_can_be_switched_off(self):
+        with patch.dict(os.environ, {"KEYCLOAK_PASSWORD_LOGIN": "false"}):
+            with self.assertRaises(HTTPException) as raised:
+                keycloak.password_login("person", "secret", "10.0.0.1")
+        self.assertEqual(raised.exception.status_code, 404)
+        self.http.post.assert_not_called()
+
+    def client(self):
+        from app.api.account_routes import router as account_router
+        app = FastAPI()
+        app.include_router(account_router, prefix="/api")
+        self.enterContext(patch("app.api.account_routes.get_user_account_store", return_value=self.store))
+        self.enterContext(patch("app.core.user_accounts.get_user_account_store", return_value=self.store))
+        return self.enterContext(TestClient(app, base_url="https://analytics.example"))
+
+    def test_route_sets_the_session_cookie_and_logout_stays_in_the_application(self):
+        claims = self.claims()
+        del claims["nonce"]
+        self.answer(200, {"id_token": self.signed(claims)})
+        client = self.client()
+        origin = {"Origin": "https://analytics.example"}
+        response = client.post("/api/auth/keycloak/password", json={"username": "person@example", "password": "short"}, headers=origin)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn(SESSION_COOKIE, response.headers["set-cookie"])
+        self.assertEqual(response.json()["user"]["display_name"], "Federated person")
+        self.assertIsNone(client.post("/api/auth/logout", headers=origin).json()["logout_url"])
+
+    def test_route_errors_never_echo_the_password(self):
+        client = self.client()
+        origin = {"Origin": "https://analytics.example"}
+        self.answer(401, {"error": "invalid_grant", "error_description": "Invalid user credentials"})
+        wrong = client.post("/api/auth/keycloak/password", json={"username": "person", "password": "secret-value-1"}, headers=origin)
+        self.assertEqual(wrong.status_code, 401)
+        invalid = client.post("/api/auth/keycloak/password", json={"username": "", "password": "secret-value-2"}, headers=origin)
+        self.assertEqual(invalid.status_code, 422)
+        self.assertNotIn("secret-value", wrong.text + invalid.text)
+        self.answer(400, {"error": "invalid_grant", "error_description": "Account is not fully set up"})
+        self.assertEqual(client.post("/api/auth/keycloak/password", json={"username": "new", "password": "x"}, headers=origin).status_code, 409)
+        self.assertEqual(client.post("/api/auth/keycloak/password", json={"username": "person", "password": "x"}, headers={"Origin": "https://evil.example"}).status_code, 403)
 
 
 if __name__ == "__main__":

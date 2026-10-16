@@ -50,8 +50,8 @@ def _hierarchy_rows():
         raise ValueError('Organization hierarchy requires ClickHouse')
     from app.services.clickhouse_analytics import clickhouse_analytics, _SqlWhere
     from app.services.analytics import semantic_signature
-    keys = ['bbak_id', 'bbak_title', 'rota_id', 'rota_title', 'crew']
-    return cache.get_or_load('bi.hierarchy.rows', {'source': semantic_signature()},
+    keys = ['bbak_id', 'bbak_title', 'rota_id', 'rota_title', 'crew', 'device_type']
+    return cache.get_or_load('bi.hierarchy.rows', {'source': semantic_signature(), 'keys': keys},
         lambda: clickhouse_analytics._query_rows('flight_list', keys, _SqlWhere()),
         ttl_seconds=get_backend_config().cache.ttl_seconds.filter_options,
         dependency_tags=['dictionary'],
@@ -74,7 +74,11 @@ def hierarchy_options(principal):
     can_departments = principal.has('comparison.view') and principal.has('comparison.department')
     can_groups = principal.has('comparison.view') and principal.has('comparison.group')
     can_teams = principal.has('comparison.view') and principal.has('comparison.team')
-    output = {'departments': {}, 'groups': {}, 'teams': {}}
+    can_categories = principal.has('comparison.view') and principal.has('comparison.category')
+    can_crews = principal.has('comparison.view') and (principal.has('comparison.crew') or principal.has('comparison.team'))
+    own_categories = {str(row['device_type']) for row in own if row.get('device_type') not in (None, '')}
+    own_crews = {(str(row['device_type']), str(row['bbak_id']), str(row['crew'])) for row in own if row.get('device_type') not in (None, '') and row.get('bbak_id') is not None and row.get('crew') is not None}
+    output = {'departments': {}, 'groups': {}, 'teams': {}, 'categories': {}, 'crews': {}}
     for row in rows:
         department = str(row['bbak_id']) if row.get('bbak_id') is not None else None
         group = str(row['rota_id']) if row.get('rota_id') is not None else None
@@ -90,6 +94,12 @@ def hierarchy_options(principal):
             own_team = (department, group, team) in teams
             if own_team or ((department, group) in groups and can_teams):
                 output['teams'][(department, group, team)] = {'id': team, 'title': team, 'department_id': department, 'group_id': group}
+        # Device type ("кафедра") is the context for crew comparison.
+        category = str(row['device_type']) if row.get('device_type') not in (None, '') else None
+        if category is not None and (category in own_categories or can_categories):
+            output['categories'][category] = {'id': category, 'title': category}
+        if category is not None and team is not None and ((category, department, team) in own_crews or (category in own_categories and can_crews)):
+            output['crews'][(category, department, team)] = {'id': team, 'title': team, 'category': category, 'department_id': department, **({'group_id': group} if group is not None else {})}
     return {key: sorted(values.values(), key=lambda item: (item['title'], item['id'])) for key, values in output.items()}
 
 

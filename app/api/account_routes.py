@@ -14,6 +14,7 @@ from app.core.user_accounts import (
     CreateUserRequest,
     DashboardResponse,
     DashboardUpdate,
+    KeycloakLoginRequest,
     LoginRequest,
     PublicUser,
     SessionResponse,
@@ -71,6 +72,22 @@ def auth_login(body: LoginRequest, request: Request, response: Response):
     return SessionResponse(enabled=True, user=user)
 
 
+@router.post("/auth/keycloak/password", response_model=SessionResponse)
+def keycloak_password_login(body: KeycloakLoginRequest, request: Request, response: Response):
+    # The application's own sign-in form; the password is checked by Keycloak.
+    check_request_origin(request)
+    client = request.client.host if request.client is not None else "unknown"
+    try:
+        token, user = account_operation(lambda: keycloak.password_login(body.username, body.password.get_secret_value(), client))
+    except keycloak.SetupRequired:
+        raise HTTPException(409, "Account setup must be completed in Keycloak") from None
+    store = get_user_account_store()
+    previous = request.cookies.get(SESSION_COOKIE)
+    account_operation(lambda: store.logout(previous))
+    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_SECONDS, httponly=True, secure=secure_session_cookie(request), samesite="strict", path="/")
+    return SessionResponse(enabled=True, user=user)
+
+
 @router.post("/auth/logout", response_model=SessionResponse)
 def auth_logout(request: Request, response: Response):
     check_request_origin(request)
@@ -78,7 +95,7 @@ def auth_logout(request: Request, response: Response):
     account_operation(lambda: store.logout(request.cookies.get(SESSION_COOKIE)))
     enabled = keycloak.enabled() or account_operation(store.enabled)
     response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=secure_session_cookie(request), samesite="strict")
-    return SessionResponse(enabled=enabled, user=None, logout_url=keycloak.logout_url() if keycloak.enabled() else None)
+    return SessionResponse(enabled=enabled, user=None, logout_url=keycloak.logout_url() if keycloak.enabled() and not keycloak.password_login_enabled() else None)
 
 
 @router.get("/me/dashboard", response_model=DashboardResponse)

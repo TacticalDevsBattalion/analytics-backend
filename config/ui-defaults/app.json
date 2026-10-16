@@ -9,7 +9,7 @@
     "default_page": "dashboard"
   },
   "defaults": {
-    "date_range_days": 7,
+    "date_range_days": 1,
     "calendar_anchor_hour": 12,
     "density": "comfortable",
     "animations": true

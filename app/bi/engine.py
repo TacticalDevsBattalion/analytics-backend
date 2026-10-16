@@ -52,7 +52,7 @@ ALIASES = {
     "status": "result",
     "zone": "units", "target_type": "target_class", "department_category": "device_type",
 }
-VIRTUAL_FIELDS = {"flights": {"norm_main_result", "local_timestamp", "mission_successful"}, "events": {"norm_result", "norm_target_class", "is_personnel", "norm_bc_name", "local_timestamp"}, "ammunition": {"norm_result", "norm_bc_name", "local_timestamp"}, "lost_devices": {"norm_result", "local_timestamp"}}
+VIRTUAL_FIELDS = {"flights": {"norm_main_result", "local_timestamp", "mission_successful", "day_part"}, "events": {"norm_result", "norm_target_class", "is_personnel", "norm_bc_name", "local_timestamp"}, "ammunition": {"norm_result", "norm_bc_name", "local_timestamp"}, "lost_devices": {"norm_result", "local_timestamp"}}
 INHERITED_FLIGHT_FIELDS = SOURCE_FIELDS["flights"] - {"flight_id", "date"}
 ENRICHED_FIELDS = {"department_id", "group_id", "team_id", *INHERITED_FLIGHT_FIELDS, *ALIASES}
 FILTER_FIELDS = set().union(*SOURCE_FIELDS.values(), *VIRTUAL_FIELDS.values(), ENRICHED_FIELDS)
@@ -76,7 +76,7 @@ PRIMARY_FILTER_SOURCE = {
     **{field: "events" for field in ("result", "status", "target_class", "class_name", "target_id", "field_200", "field_300", "units", "unit", "flight_purpose", "flight_number", "id", "device_type_id", "row_hash", "time", "timestamp")},
     "bc_name": "ammunition", "bc_count": "ammunition",
     "norm_result": "events", "norm_target_class": "events", "is_personnel": "events", "norm_bc_name": "ammunition", "zone": "events", "target_type": "events",
-    "mission_successful": "flights",
+    "mission_successful": "flights", "day_part": "flights",
 }
 RESTRICTED_BREAKDOWN_DIMENSIONS = {"purpose", "main_purpose", "flight_purpose", "category", "device_type", "department_category", "target_type", "target_class", "class_name", "date", "direction", "zone", "units"}
 
@@ -164,6 +164,20 @@ def _local_timestamp(row: Mapping[str, Any], source: str) -> float | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=ZoneInfo(get_backend_config().analytics.timezone))
     return parsed.timestamp()
+
+
+DAY, NIGHT = "День", "Ніч"
+
+
+def _day_part(timestamp: float | None) -> str:
+    """Day or night by the configured day period, as on the dashboard timeline:
+    a flight without a time counts as night there too."""
+    if timestamp is None:
+        return NIGHT
+    config = get_backend_config().analytics
+    clock = datetime.fromtimestamp(timestamp, ZoneInfo(config.timezone)).time()
+    start, end = (datetime.fromisoformat(f"2000-01-01T{value}").time() for value in (config.day_period.start, config.day_period.end))
+    return DAY if start <= clock < end else NIGHT
 
 
 def _date(value: Any) -> date | None:
@@ -288,6 +302,7 @@ def _enrich(dataset: Mapping[str, list[dict[str, Any]]]) -> dict[str, list[dict[
         row.update(department_id=row.get("bbak_id"), group_id=row.get("rota_id"), team_id=row.get("crew"))
         row["norm_main_result"] = _normalized_text(row.get("main_result"))
         row["local_timestamp"] = _local_timestamp(row, "flights")
+        row["day_part"] = _day_part(row["local_timestamp"])
         flight_id = row.get("flight_id")
         if flight_id is not None:
             key = str(flight_id)
@@ -1409,6 +1424,20 @@ class QueryEngine:
         return {"level": level.upper(), "own_id": str(own_id), "peer_id": str(peer_id) if peer_id is not None else None, "precision": precision, "rows": rows, "status": "success" if rows else "empty", "raw_visible": raw}
 
 
+# Ammunition is spent only on strike and mining flights. The ammunition table also
+# holds delivery cargo, distances, weights and detections, which are not spending.
+AMMUNITION_MISSION_PURPOSES = ("Ураження", "Динамічне ураження", "Вільне полювання", "Планове ураження", "Засідка", "Мінування")
+NON_AMMUNITION_NAMES = ("Відстань", "Вага", "Майно позиції")
+
+
+def ammunition_spending_filters() -> list[dict[str, Any]]:
+    detected = get_backend_config().analytics.detected_ammunition_name
+    return [
+        {"field": "main_purpose", "operator": "in", "value": list(AMMUNITION_MISSION_PURPOSES)},
+        {"field": "norm_bc_name", "operator": "not_in", "value": [_normalized_text(name) for name in (*NON_AMMUNITION_NAMES, detected)]},
+    ]
+
+
 def default_metric_definitions() -> list[Any]:
     """Return the deterministic metric template used for imports and parity."""
     from app.bi.models import MetricDefinition
@@ -1418,7 +1447,7 @@ def default_metric_definitions() -> list[Any]:
         {"id": "system-metric-effective", "key": "effective", "title": "Результативні польоти", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "filters": [{"field": "mission_successful", "operator": "eq", "value": True}], "direction": "HIGHER_IS_BETTER"},
         {"id": "system-metric-efficiency", "key": "efficiency", "title": "Результативність", "aggregation": "RATIO", "numerator": "effective", "denominator": "flights", "format": {"type": "percent", "decimals": 1}, "direction": "HIGHER_IS_BETTER", "percentage_difference": "percentage_points"},
         {"id": "system-metric-events", "key": "events", "title": "Події", "source": "events", "aggregation": "COUNT"},
-        {"id": "system-metric-ammunition", "key": "ammunition", "title": "Витрати боєприпасів", "source": "ammunition", "aggregation": "SUM", "field": "bc_count", "direction": "LOWER_IS_BETTER"},
+        {"id": "system-metric-ammunition", "key": "ammunition", "title": "Витрати боєприпасів", "source": "ammunition", "aggregation": "SUM", "field": "bc_count", "filters": ammunition_spending_filters(), "direction": "LOWER_IS_BETTER"},
         {"id": "system-metric-lost", "key": "lost_devices", "title": "Втрати засобів", "source": "lost_devices", "aggregation": "COUNT", "direction": "LOWER_IS_BETTER"},
         {"id": "system-metric-weighted", "key": "weighted_result", "title": "Зважений результат", "source": "events", "aggregation": "WEIGHTED_SUM", "category_field": "target_class", "direction": "HIGHER_IS_BETTER", "description": "Сума налаштованих ваг категорій подій. Категорії без ваги та виключені категорії не входять у загальний результат."},
     ]
@@ -1429,17 +1458,27 @@ def default_metric_definitions() -> list[Any]:
         {"key": "detected", "title": "Виявлено", "source": "ammunition", "aggregation": "SUM", "field": "bc_count", "filters": [{"field": "norm_bc_name", "operator": "eq", "value": _normalized_text(config.detected_ammunition_name)}], "direction": "HIGHER_IS_BETTER"},
         {"key": "affected", "title": "Уражено ОС", "source": "events", "aggregation": "SUM", "field": "field_300", "filters": [{"field": "is_personnel", "operator": "eq", "value": True}], "direction": "HIGHER_IS_BETTER", "description": "Кількість ураженого особового складу за окремим числовим полем подій, як у поточних KPI-картках."},
         {"key": "destroyed", "title": "Знищено ОС", "source": "events", "aggregation": "SUM", "field": "field_200", "filters": [{"field": "is_personnel", "operator": "eq", "value": True}], "direction": "HIGHER_IS_BETTER"},
+        {"key": "day_flights", "title": "Вильоти вдень", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "filters": [{"field": "day_part", "operator": "eq", "value": DAY}], "direction": "HIGHER_IS_BETTER"},
+        {"key": "night_flights", "title": "Вильоти вночі", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "filters": [{"field": "day_part", "operator": "eq", "value": NIGHT}], "direction": "HIGHER_IS_BETTER"},
         {**target, "key": "target_affected", "title": "Уражені цілі", "aggregation": "COUNT", "filters": [{"field": "norm_result", "operator": "eq", "value": affected}]},
         {**target, "key": "target_destroyed", "title": "Знищені цілі", "aggregation": "COUNT", "filters": [{"field": "norm_result", "operator": "eq", "value": destroyed}]},
         {**target, "key": "target_results", "title": "Уражено + знищено", "aggregation": "FORMULA", "formula": {"op": "add", "args": [{"metric": "target_affected"}, {"metric": "target_destroyed"}]}},
         {**target, "key": "targets", "title": "Унікальні цілі", "aggregation": "COUNT_DISTINCT", "field": "target_id", "description": "Кількість різних наявних ідентифікаторів цілей у подіях. Події без ідентифікатора не створюють вигаданих цілей."},
         {**target, "key": "flights_for_affected", "title": "Вильоти з ураженням", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "filters": [{"field": "norm_result", "operator": "eq", "value": affected}]},
         {**target, "key": "flights_for_destroyed", "title": "Вильоти зі знищенням", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "filters": [{"field": "norm_result", "operator": "eq", "value": destroyed}]},
+        # Responsibility zones exist only in result records, so flights per zone
+        # are counted from there; flights without any result record have no zone.
+        {"key": "zone_flights", "title": "Вильоти із записами результатів", "source": "events", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "direction": "HIGHER_IS_BETTER"},
+        {"key": "target_detected", "title": "Виявлені цілі (записи результатів)", "source": "events", "aggregation": "COUNT", "filters": [{"field": "norm_result", "operator": "eq", "value": _normalized_text(config.detected_ammunition_name)}], "direction": "HIGHER_IS_BETTER"},
         {**target, "key": "flights_for_result", "title": "Вильоти з результатом", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "filters": [{"field": "norm_result", "operator": "in", "value": [affected, destroyed]}]},
     ]
     for suffix, label, denominator in (("affected", "ураження", "target_affected"), ("destroyed", "знищення", "target_destroyed"), ("result", "результат", "target_results")):
         semantics.append({**target, "key": f"flights_per_{suffix}", "title": f"Середні вильоти на {label}", "aggregation": "RATIO", "numerator": f"flights_for_{suffix}", "denominator": denominator, "format": {"type": "number", "decimals": 2}, "direction": "LOWER_IS_BETTER", "description": "Унікальні вильоти, пов’язані через стабільний ідентифікатор із відповідними записами результату, поділені на кількість цих записів. Не включає непов’язані вильоти і не оцінює невідомі спроби до успіху."})
     definitions.extend({"id": f"system-metric-{item['key']}", **item} for item in semantics)
+    from app.bi.metric_texts import METRIC_TEXTS
+    for item in definitions:
+        if item["key"] in METRIC_TEXTS:
+            item["title"], item["description"] = METRIC_TEXTS[item["key"]]
     return [MetricDefinition.model_validate(item) for item in definitions]
 
 

@@ -8,7 +8,8 @@ router = APIRouter()
 
 @router.get("/auth/provider", operation_id="getAuthenticationProvider")
 def authentication_provider():
-    return {"provider": "keycloak" if keycloak.enabled() else "local", "login_url": "/api/auth/keycloak/login" if keycloak.enabled() else None}
+    return {"provider": "keycloak" if keycloak.enabled() else "local", "login_url": "/api/auth/keycloak/login" if keycloak.enabled() else None,
+            "password_login": keycloak.password_login_enabled()}
 
 
 @router.get("/auth/keycloak/login", operation_id="beginKeycloakLogin")

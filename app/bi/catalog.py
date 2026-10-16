@@ -16,10 +16,11 @@ DIMENSIONS = {
     'direction': ('АК', 'Контекст місії'), 'purpose': ('Мета', 'Контекст місії'),
     'device': ('Засіб', 'Контекст місії'), 'target_type': ('Тип цілі', 'Результати'),
     'zone': ('Зона відповідальності', 'Контекст місії'),
+    'bbak_title': ('ББАК', 'Організація'), 'position': ('Позиція', 'Організація'), 'day_part': ('День / ніч', 'Час'),
 }
 FILTERS = {**DIMENSIONS, 'result': ('Результат події', 'Результати'), 'main_result': ('Основний результат місії', 'Результати'), 'is_effective': ('Результативний виліт', 'Результативність')}
 METRIC_CATEGORIES = {
-    'flights': 'Активність', 'avg_flights_per_position': 'Активність',
+    'flights': 'Активність', 'avg_flights_per_position': 'Активність', 'day_flights': 'Активність', 'night_flights': 'Активність',
     'effective': 'Результативність', 'efficiency': 'Результативність',
     'weighted_efficiency': 'Результативність', 'detected': 'Результати',
     'affected': 'Результати', 'destroyed': 'Результати', 'target_results': 'Результати',
@@ -48,7 +49,7 @@ def catalog(service: QueryEngine, principal) -> dict:
     available = {item['field'] for item in metadata['dimensions']}
     dimensions = [{'key': key, 'field': key, 'label': label, 'title': label, 'category': category, 'granularities': ['day', 'week', 'month', 'quarter', 'year'] if key == 'date' else []} for key, (label, category) in DIMENSIONS.items() if key in available]
     filters = [{'key': key, 'field': key, 'label': label, 'title': label, 'category': category, 'operators': ['eq', 'neq', 'in', 'not_in', 'is_null', 'is_not_null'] if key != 'date' else ['eq']} for key, (label, category) in FILTERS.items() if key in metadata['filter_fields']]
-    result = {'metrics': metrics, 'dimensions': dimensions, 'filters': filters, 'filter_fields': filters, 'visualizations': list(VISUALIZATIONS), 'permissions': [permission for permission in PERMISSIONS if principal.has(permission)], 'revision': getattr(service.store, 'configuration_revision', lambda: 0)(), 'data_scope': principal.scope.model_dump(mode='json'), 'sections': [{'key': key, 'label': label} for key, label in {'overview': 'Огляд', 'effectiveness': 'Результативність', 'targets': 'Результати за цілями', 'losses': 'Втрати', 'resources': 'Ресурси'}.items()]}
+    result = {'metrics': metrics, 'dimensions': dimensions, 'filters': filters, 'filter_fields': filters, 'visualizations': list(VISUALIZATIONS), 'permissions': [permission for permission in PERMISSIONS if principal.has(permission)], 'revision': getattr(service.store, 'configuration_revision', lambda: 0)(), 'data_scope': principal.scope.model_dump(mode='json'), 'sections': [{'key': key, 'label': label} for key, label in {'overview': 'Огляд', 'effectiveness': 'Результативність', 'targets': 'Результати за цілями', 'losses': 'Втрати', 'resources': 'Ресурси', 'positions': 'Позиції'}.items()]}
     result['fingerprint'] = hashlib.sha256(_canonical(result).encode()).hexdigest()
     return result
 

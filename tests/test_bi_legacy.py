@@ -216,7 +216,24 @@ class LegacyScopeTests(unittest.TestCase):
             self.assertEqual(hierarchy_options(missing_view), own)
         for values in permitted.values():
             for item in values:
-                self.assertTrue(set(item) <= {'id', 'title', 'department_id', 'group_id'})
+                self.assertTrue(set(item) <= {'id', 'title', 'department_id', 'group_id', 'category'})
+
+    def test_hierarchy_lists_categories_and_crews_within_permissions(self):
+        rows = [
+            {'bbak_id': 1, 'bbak_title': 'Own', 'rota_id': 11, 'crew': 'own-team', 'device_type': 'FPV'},
+            {'bbak_id': 1, 'bbak_title': 'Own', 'rota_id': 11, 'crew': 'own-team', 'device_type': 'Mavic'},
+            {'bbak_id': 2, 'bbak_title': 'Outside', 'rota_id': 21, 'crew': 'peer-team', 'device_type': 'FPV'},
+            {'bbak_id': 2, 'bbak_title': 'Outside', 'rota_id': 21, 'crew': 'bomber', 'device_type': 'Bomber'},
+        ]
+        viewer = replace(self.viewer, scope=DataScope(scope_type='DEPARTMENT', scope_ids=['1']))
+        with patch('app.services.bi_legacy._hierarchy_rows', return_value=rows):
+            own = hierarchy_options(viewer)
+            self.assertEqual({row['id'] for row in own['categories']}, {'FPV', 'Mavic'})
+            self.assertEqual({(row['category'], row['id'], row['department_id']) for row in own['crews']}, {('FPV', 'own-team', '1'), ('Mavic', 'own-team', '1')})
+            granted = hierarchy_options(replace(viewer, permissions=viewer.permissions | {'comparison.category', 'comparison.crew'}))
+            self.assertEqual({row['id'] for row in granted['categories']}, {'FPV', 'Mavic', 'Bomber'})
+            # Peer crews only inside a category the viewer itself works in.
+            self.assertEqual({(row['category'], row['id']) for row in granted['crews']}, {('FPV', 'own-team'), ('Mavic', 'own-team'), ('FPV', 'peer-team')})
 
     def test_administrator_hierarchy_stays_complete_for_configuration_editing(self):
         rows = [{'bbak_id': 1, 'rota_id': 11, 'crew': 'one'}, {'bbak_id': 2, 'rota_id': 21, 'crew': 'two'}]

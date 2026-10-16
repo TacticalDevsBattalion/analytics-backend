@@ -243,7 +243,7 @@ def default_application_configuration() -> ApplicationConfiguration:
             "menu": ["dashboard", "statistics", "comparison", "map", "table", "saved", "dictionaries", "settings"],
         },
         "defaults": {
-            "date_range_days": app.get("defaults", {}).get("date_range_days", 7),
+            "date_range_days": app.get("defaults", {}).get("date_range_days", 1),
             "comparison_mode": "units_over_time", "comparison_granularity": "week",
         },
         "dictionaries": {"labels": {}},
