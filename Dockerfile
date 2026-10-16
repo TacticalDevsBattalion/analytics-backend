@@ -1,4 +1,7 @@
-FROM python:3.13-slim AS base
+# Базовий образ — з внутрішнього реєстру: python:3.13-slim там уже з k2 CA і PIP_TRUSTED_HOST.
+# Поза мережею k2: --build-arg REGISTRY=docker.io/library
+ARG REGISTRY=10.20.50.25:8081
+FROM ${REGISTRY}/python:3.13-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
