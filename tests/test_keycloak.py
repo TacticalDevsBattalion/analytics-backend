@@ -207,7 +207,34 @@ class KeycloakTests(unittest.TestCase):
             opaque = client.cookies.get(SESSION_COOKIE)
             self.assertIsNotNone(self.store.session_user(opaque))
             replayed = client.get("/api/auth/keycloak/callback", params={"code": "code", "state": query["state"][0]}, follow_redirects=False)
-            self.assertEqual(replayed.status_code, 400)
+            self.assertEqual(replayed.status_code, 303)
+            self.assertEqual(replayed.headers["location"], self.config["frontend"] + "?auth_error=failed")
+
+    def test_cancelled_or_incomplete_callback_returns_to_sign_in_page(self):
+        app = FastAPI()
+        app.include_router(router, prefix="/api")
+        with TestClient(app, base_url="https://analytics.example") as client:
+            started = client.get("/api/auth/keycloak/login", follow_redirects=False)
+            state = parse_qs(urlsplit(started.headers["location"]).query)["state"][0]
+            cancelled = client.get("/api/auth/keycloak/callback", params={"error": "access_denied", "state": state}, follow_redirects=False)
+            self.assertEqual(cancelled.status_code, 303)
+            self.assertEqual(cancelled.headers["location"], self.config["frontend"] + "?auth_error=cancelled")
+            self.assertIsNone(client.cookies.get(SESSION_COOKIE))
+            missing = client.get("/api/auth/keycloak/callback", follow_redirects=False)
+            self.assertEqual(missing.headers["location"], self.config["frontend"] + "?auth_error=failed")
+        self.http.post.assert_not_called()
+
+    def test_logout_ends_keycloak_session_through_rp_initiated_logout(self):
+        from app.api.account_routes import router as account_router
+        app = FastAPI()
+        app.include_router(account_router, prefix="/api")
+        with patch("app.api.account_routes.get_user_account_store", return_value=self.store), patch("app.core.user_accounts.get_user_account_store", return_value=self.store), TestClient(app, base_url="https://analytics.example") as client:
+            response = client.post("/api/auth/logout", headers={"Origin": "https://analytics.example"})
+            self.assertEqual(response.status_code, 200, response.text)
+            url = urlsplit(response.json()["logout_url"])
+            self.assertEqual(url.scheme + "://" + url.netloc + url.path, self.config["issuer"] + "/protocol/openid-connect/logout")
+            self.assertEqual(parse_qs(url.query), {"client_id": ["analytics-ui"], "post_logout_redirect_uri": [self.config["frontend"]]})
+            self.assertNotIn("test-confidential-secret", response.text)
 
 
 if __name__ == "__main__":

@@ -101,6 +101,8 @@ class PublicUser(SessionUser):
 class SessionResponse(AccountModel):
     enabled: bool
     user: SessionUser | None
+    # Set after logout when the identity provider session must also be ended.
+    logout_url: str | None = None
 
 
 class DashboardResponse(AccountModel):

@@ -71,6 +71,21 @@ def begin_login() -> tuple[str, str]:
     return config["issuer"] + "/protocol/openid-connect/auth?" + urlencode(parameters), browser
 
 
+def logout_url() -> str | None:
+    """RP-initiated logout ends the Keycloak SSO session, not only the local one."""
+    try:
+        config = configuration()
+    except HTTPException:
+        return None
+    parameters = {"client_id": config["client_id"], "post_logout_redirect_uri": config["frontend"]}
+    return config["issuer"] + "/protocol/openid-connect/logout?" + urlencode(parameters)
+
+
+def frontend_with_error(reason: str) -> str:
+    frontend = configuration()["frontend"]
+    return frontend + ("&" if urlsplit(frontend).query else "?") + urlencode({"auth_error": reason})
+
+
 def consume_state(state: str, browser: str | None) -> tuple[str, str]:
     if not browser or not state or len(state) > 128 or len(browser) > 128:
         raise HTTPException(400, "Invalid or expired sign-in request")

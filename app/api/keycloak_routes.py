@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from app.core import keycloak
 from app.core.user_accounts import SESSION_COOKIE, SESSION_SECONDS, account_operation, get_user_account_store, secure_session_cookie
@@ -21,11 +21,21 @@ def login(request: Request):
 
 
 @router.get("/auth/keycloak/callback", operation_id="completeKeycloakLogin")
-def callback(request: Request, code: str, state: str):
-    token, _ = account_operation(lambda: keycloak.complete_login(code, state, request.cookies.get(keycloak.LOGIN_COOKIE)))
-    account_operation(lambda: get_user_account_store().logout(request.cookies.get(SESSION_COOKIE)))
-    response = RedirectResponse(keycloak.configuration()["frontend"], status_code=303)
-    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_SECONDS, httponly=True, secure=secure_session_cookie(request), samesite="strict", path="/")
+def callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
+    # Failures return the browser to the sign-in page instead of a raw JSON error.
+    try:
+        if error or not code or not state:
+            raise HTTPException(400, "Keycloak sign-in was not completed")
+        token, _ = account_operation(lambda: keycloak.complete_login(code, state, request.cookies.get(keycloak.LOGIN_COOKIE)))
+        account_operation(lambda: get_user_account_store().logout(request.cookies.get(SESSION_COOKIE)))
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise
+        reason = "cancelled" if error == "access_denied" else "unavailable" if exc.status_code == 503 else "failed"
+        response = RedirectResponse(keycloak.frontend_with_error(reason), status_code=303)
+    else:
+        response = RedirectResponse(keycloak.configuration()["frontend"], status_code=303)
+        response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_SECONDS, httponly=True, secure=secure_session_cookie(request), samesite="strict", path="/")
     response.delete_cookie(keycloak.LOGIN_COOKIE, path="/api/auth/keycloak")
     response.headers["Cache-Control"] = "no-store"
     return response

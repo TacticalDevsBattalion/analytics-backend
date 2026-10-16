@@ -78,7 +78,7 @@ def auth_logout(request: Request, response: Response):
     account_operation(lambda: store.logout(request.cookies.get(SESSION_COOKIE)))
     enabled = keycloak.enabled() or account_operation(store.enabled)
     response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=secure_session_cookie(request), samesite="strict")
-    return SessionResponse(enabled=enabled, user=None)
+    return SessionResponse(enabled=enabled, user=None, logout_url=keycloak.logout_url() if keycloak.enabled() else None)
 
 
 @router.get("/me/dashboard", response_model=DashboardResponse)
