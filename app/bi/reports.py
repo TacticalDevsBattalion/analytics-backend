@@ -142,6 +142,10 @@ class SuccessCalculator:
         return 0.0, 0.0  # Unselected private KPI values are not calculated.
 
 
+# Bumped when a report's payload changes, so cached reports are rebuilt.
+_BUILTIN_VERSIONS = {'map': 2}
+
+
 def builtin_result(widget, query, principal, service):
     from app.bi.security import require_permission
     require_permission(principal, 'metric.view')
@@ -177,7 +181,7 @@ def builtin_result(widget, query, principal, service):
     tags += prepared.get('_cache_parent_tags', [])
     vector = cache.generations(tags)
     stable = not prepared.get('_cache_uncacheable')
-    signature = {'source': service.semantic_signature(), 'principal': principal.cache_key(), 'query': request, 'builtin': widget.builtin, 'keys': keys, 'definitions': dependencies, 'weights': weights, 'kpi': snapshot.fingerprint, 'policy': policy_fingerprint(service.store), 'mode': widget.visualization.options.get('rule_mode', 'CURRENT_RULE'), 'prepared_generations': prepared.get('_cache_read_generations'), 'report_generations': vector}
+    signature = {'source': service.semantic_signature(), 'principal': principal.cache_key(), 'query': request, 'builtin': widget.builtin, 'builtin_version': _BUILTIN_VERSIONS.get(widget.builtin, 1), 'keys': keys, 'definitions': dependencies, 'weights': weights, 'kpi': snapshot.fingerprint, 'policy': policy_fingerprint(service.store), 'mode': widget.visualization.options.get('rule_mode', 'CURRENT_RULE'), 'prepared_generations': prepared.get('_cache_read_generations'), 'report_generations': vector}
 
     def compute():
         dataset = supply()
@@ -209,7 +213,12 @@ def builtin_result(widget, query, principal, service):
         elif widget.builtin in {'records', 'losses', 'map'}:
             records = report._lost_device_rows(filters) if widget.builtin == 'losses' else report.events(filters)
             records = [row.model_dump(mode='json') for row in records]
-            payload = {'geojson': report.geojson(filters), 'rows': records} if widget.builtin == 'map' else records
+            if widget.builtin == 'map':
+                from app.services.map_layers import map_lines
+                coordinates = principal.has('map.coordinates')
+                payload = {'geojson': report.geojson(filters) if coordinates else {'type': 'FeatureCollection', 'features': []}, 'lines': map_lines(), 'coordinates': coordinates, 'rows': records}
+            else:
+                payload = records
             rows, metadata = [], []
         else:
             raise ValueError('Unknown system report')

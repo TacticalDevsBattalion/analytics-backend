@@ -85,7 +85,9 @@
       "device",
       "device_type_id",
       "bc_name",
-      "bc_count"
+      "bc_count",
+      "mgrs",
+      "location_name"
     ],
     "lost_devices": [
       "flight_id",

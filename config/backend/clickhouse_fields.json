@@ -40,7 +40,9 @@
       "device": ["means", "device"],
       "device_type_id": ["device_type_id", "deviceTypeId"],
       "bc_name": ["bc_name", "bcName"],
-      "bc_count": ["bc_count", "bcCount"]
+      "bc_count": ["bc_count", "bcCount"],
+      "mgrs": ["mgrs_insert", "mgrs"],
+      "location_name": ["location_name", "locationName"]
     },
     "lost_devices": {
       "flight_id": ["unique_flight_id", "uniqueFlightId"],

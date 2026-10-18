@@ -678,5 +678,14 @@ class AnalyticsEngine:
         return out
 
     def geojson(self, f: FilterRequest) -> dict[str, Any]:
-        # Precise operational coordinates remain out of the viewer contract.
-        return {"type": "FeatureCollection", "features": []}
+        """Struck and destroyed targets; callers check the map.coordinates permission."""
+        from app.services.map_layers import target_features
+
+        flights, rows, _ = self._dataset(f)
+        index = {str(row.get("flight_id")).strip(): row for row in flights if row.get("flight_id") is not None}
+        return target_features(
+            rows,
+            affected=_normalized_text(ANALYTICS_CONFIG.result_names["affected"]),
+            destroyed=_normalized_text(ANALYTICS_CONFIG.result_names["destroyed"]),
+            flights=index,
+        )

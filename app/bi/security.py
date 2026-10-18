@@ -29,6 +29,8 @@ PERMISSIONS = (
     'personal_dashboard.widget.delete', 'personal_dashboard.appearance.edit',
     'dashboard.system_global_widget.view', 'analytics.global_query',
     'comparison.category', 'comparison.unit', 'comparison.crew',
+    # Exact coordinates of struck and destroyed targets on the map.
+    'map.coordinates',
 )
 PERMISSION_ALIASES = {
     'dashboard.admin_edit': 'dashboard.manage', 'statistics.admin_edit': 'dashboard.manage',

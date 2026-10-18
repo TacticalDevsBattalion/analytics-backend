@@ -21,7 +21,7 @@ from app.core.config import get_backend_config, get_settings
 from app.core.kpi_configuration import KpiDataUnavailable
 from app.core.user_accounts import check_request_origin, legacy_administrator, session_identity
 from app.services import analytics, comparison
-from app.services.bi_legacy import legacy_operation
+from app.services.bi_legacy import current_principal, legacy_operation
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -120,7 +120,18 @@ def events(filters: FilterRequest, request: Request):
 
 @router.post('/analytics/map', response_model=GeoFeatureCollection, operation_id='getAnalyticsMap')
 def map_data(filters: FilterRequest, request: Request):
-    return legacy_operation(request, lambda: analytics.geojson(filters))
+    def load():
+        # The map cache is shared by data scope, so the permission is checked per request.
+        if not current_principal().has('map.coordinates'):
+            return {'type': 'FeatureCollection', 'features': []}
+        return analytics.geojson(filters)
+    return legacy_operation(request, load)
+
+
+@router.get('/analytics/map/lines', operation_id='getAnalyticsMapLines')
+def map_lines(request: Request):
+    from app.services.map_layers import map_lines as load_lines
+    return legacy_operation(request, lambda: {**load_lines(), 'coordinates': current_principal().has('map.coordinates')})
 
 
 @router.get('/cache/status', operation_id='getCacheStatus')

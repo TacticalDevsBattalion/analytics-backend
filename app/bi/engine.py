@@ -40,7 +40,7 @@ class QueryPermissionError(PermissionError):
 SOURCES = {"flights": "flight_list", "events": "events", "ammunition": "ammunition_expenditures", "lost_devices": "lost_devices"}
 SOURCE_FIELDS = {
     "flights": {"flight_id", "date", "crew", "device", "direction", "position", "is_effective", "device_type", "main_result", "main_purpose", "sub_department", "time_range", "bbak_id", "bbak_title", "rota_id", "rota_title", "unit_id", "unit_title"},
-    "events": {"flight_id", "date", "time", "timestamp", "flight_number", "crew", "flight_purpose", "target_class", "target_id", "result", "field_200", "field_300", "direction", "id", "units", "row_hash", "device", "device_type_id", "bc_name", "bc_count"},
+    "events": {"flight_id", "date", "time", "timestamp", "flight_number", "crew", "flight_purpose", "target_class", "target_id", "result", "field_200", "field_300", "direction", "id", "units", "row_hash", "device", "device_type_id", "bc_name", "bc_count", "mgrs", "location_name"},
     "ammunition": {"flight_id", "date", "bc_name", "bc_count", "result"},
     "lost_devices": {"flight_id", "date", "time", "device", "result", "device_type", "row_hash"},
 }
@@ -55,7 +55,9 @@ ALIASES = {
 VIRTUAL_FIELDS = {"flights": {"norm_main_result", "local_timestamp", "mission_successful", "day_part"}, "events": {"norm_result", "norm_target_class", "is_personnel", "norm_bc_name", "local_timestamp"}, "ammunition": {"norm_result", "norm_bc_name", "local_timestamp"}, "lost_devices": {"norm_result", "local_timestamp"}}
 INHERITED_FLIGHT_FIELDS = SOURCE_FIELDS["flights"] - {"flight_id", "date"}
 ENRICHED_FIELDS = {"department_id", "group_id", "team_id", *INHERITED_FLIGHT_FIELDS, *ALIASES}
-FILTER_FIELDS = set().union(*SOURCE_FIELDS.values(), *VIRTUAL_FIELDS.values(), ENRICHED_FIELDS)
+# Exact coordinates are loaded for the map only; widgets cannot filter or group by them.
+COORDINATE_FIELDS = frozenset({"mgrs", "location_name"})
+FILTER_FIELDS = set().union(*SOURCE_FIELDS.values(), *VIRTUAL_FIELDS.values(), ENRICHED_FIELDS) - COORDINATE_FIELDS
 DIMENSION_FIELDS = FILTER_FIELDS - {"field_200", "field_300", "bc_count", "timestamp", "time_range", "time", "local_timestamp", "mission_successful"}
 NUMERIC_FIELDS = {"bc_count", "field_200", "field_300", "is_effective"}
 FILTER_OPERATORS = {"eq", "neq", "in", "not_in", "gt", "gte", "lt", "lte", "contains", "not_contains", "is_null", "is_not_null", "between"}
@@ -466,7 +468,7 @@ class QueryEngine:
         snapshot = current_kpi_snapshot()
         identity = {name: getattr(settings, name, None) for name in ("active_source", "clickhouse_url", "clickhouse_host", "clickhouse_port", "clickhouse_database", "clickhouse_user")}
         from app.bi.kpi_policy_store import policy_fingerprint
-        payload = {"version": 5, "source": identity, "clickhouse": _plain(config.clickhouse), "mappings": _plain(config.clickhouse_fields), "analytics": _plain(config.analytics), "kpi_revision": snapshot.revision, "kpi_fingerprint": snapshot.fingerprint, "policy": policy_fingerprint(self.store), "extra_fields": extra_fields.signature()}
+        payload = {"version": 6, "source": identity, "clickhouse": _plain(config.clickhouse), "mappings": _plain(config.clickhouse_fields), "analytics": _plain(config.analytics), "kpi_revision": snapshot.revision, "kpi_fingerprint": snapshot.fingerprint, "policy": policy_fingerprint(self.store), "extra_fields": extra_fields.signature()}
         return hashlib.sha256(_canonical(payload).encode()).hexdigest()
 
     def _check_source(self) -> None:
