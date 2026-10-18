@@ -198,6 +198,8 @@ class EventRow(BaseModel):
     grid_ref: str
     lat: float
     lon: float
+    # Losses report: a single-use drone that struck or destroyed its target (spent, not lost).
+    spent: bool = False
 
 
 class FilterIdTitleOption(BaseModel):

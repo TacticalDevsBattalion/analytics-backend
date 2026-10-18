@@ -143,7 +143,7 @@ class SuccessCalculator:
 
 
 # Bumped when a report's payload changes, so cached reports are rebuilt.
-_BUILTIN_VERSIONS = {'map': 3}
+_BUILTIN_VERSIONS = {'map': 3, 'losses': 3}
 
 
 def builtin_result(widget, query, principal, service):
@@ -211,7 +211,7 @@ def builtin_result(widget, query, principal, service):
             payload = [point.model_dump(mode='json') for point in report.timeline(filters, snapshot.config, calculator=calculator)]
             rows, metadata = [], []
         elif widget.builtin in {'records', 'losses', 'map'}:
-            records = report._lost_device_rows(filters) if widget.builtin == 'losses' else report.events(filters)
+            records = report._lost_device_rows(filters, include_spent=True) if widget.builtin == 'losses' else report.events(filters)
             records = [row.model_dump(mode='json') for row in records]
             if widget.builtin == 'map':
                 from app.services.map_layers import map_lines

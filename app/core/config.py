@@ -126,6 +126,8 @@ class AnalyticsConfig(BaseModel):
     flight_purpose_groups: list[FlightPurposeGroupConfig]
     excluded_analytics_purposes: list[str]
     strike_device_types: list[str]
+    # Expended in every flight: a strike or kill is their purpose, not a loss.
+    single_use_device_types: list[str] = ["fpv", "fpv ппо", "ударні крила"]
     lost_device_type_aliases: dict[str, str]
     lost_devices_sentinel: str
     detected_ammunition_name: str

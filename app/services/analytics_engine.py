@@ -288,7 +288,8 @@ class AnalyticsEngine:
     def _lost_flights(self, f: FilterRequest) -> list[dict[str, Any]]:
         raise NotImplementedError
 
-    def _lost_device_rows(self, f: FilterRequest) -> list[EventRow]:
+    def _lost_device_rows(self, f: FilterRequest, *, include_spent: bool = False) -> list[EventRow]:
+        """Lost drones; with include_spent also single-use drones spent on a hit (marked spent)."""
         clean_filter = f.model_copy(update={"result": []})
         losses = self._lost_devices(clean_filter)
         flights = self._lost_flights(clean_filter)
@@ -299,10 +300,24 @@ class AnalyticsEngine:
             if flight_id:
                 flight_by_id[flight_id] = flight
 
+        single_use = {_normalized_text(value) for value in ANALYTICS_CONFIG.single_use_device_types}
+        hits = {_normalized_text(ANALYTICS_CONFIG.result_names[key]) for key in ("affected", "destroyed")}
+
         out: list[EventRow] = []
         for i, row in enumerate(losses):
             flight_id = str(row.get(LOST_DEVICE_FIELDS["flight_id"]) or "").strip()
             flight = flight_by_id.get(flight_id)
+
+            # A single-use drone that struck or destroyed its target was spent, not
+            # lost. Reusable drones are lost only by their own loss record, whatever
+            # the flight achieved.
+            raw_type = row.get(LOST_DEVICE_FIELDS["device_type"]) or (flight or {}).get(FLIGHT_FIELDS["device_type"])
+            spent = _normalized_text(raw_type) in single_use and (
+                _normalized_text(row.get(LOST_DEVICE_FIELDS["result"])) in hits
+                or _normalized_text((flight or {}).get(FLIGHT_FIELDS["main_result"])) in hits
+            )
+            if spent and not include_spent:
+                continue
 
             display_device_type = _lost_device_type_label(
                 row.get(LOST_DEVICE_FIELDS["device_type"])
@@ -356,6 +371,7 @@ class AnalyticsEngine:
                     grid_ref="—",
                     lat=0.0,
                     lon=0.0,
+                    spent=spent,
                 )
             )
 
