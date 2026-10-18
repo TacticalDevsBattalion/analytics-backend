@@ -254,6 +254,11 @@ class UserAccountStore:
         with self._connection() as connection:
             return [self._public_user(row) for row in connection.execute("SELECT * FROM users ORDER BY created_at, username_key")]
 
+    def active_users(self) -> list[PublicUser]:
+        """Users with a valid session: whose analytics pages are worth precomputing."""
+        with self._connection() as connection:
+            return [self._public_user(row) for row in connection.execute("SELECT * FROM users WHERE active=1 AND id IN (SELECT sessions.user_id FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.expires_at>? AND sessions.auth_version=users.auth_version) ORDER BY created_at, username_key", (self.clock(),))]
+
     def create_user(self, request: CreateUserRequest) -> PublicUser:
         request = CreateUserRequest.model_validate(request.model_dump())
         hashed = password_hash(request.password.get_secret_value())

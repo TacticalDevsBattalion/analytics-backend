@@ -276,6 +276,11 @@ def _restrict_by_ids(
     return [x for x in rows if x.get(id_field) and str(x.get(id_field)) in ids]
 
 
+def _penalty_check(calculator):
+    """Calculators without a lost-drone rule (KPI policies) never take a minus."""
+    return getattr(calculator, "penalized", None) or (lambda row: False)
+
+
 class AnalyticsEngine:
     """Calculation layer independent from the physical analytics data source."""
 
@@ -378,10 +383,22 @@ class AnalyticsEngine:
         loss_limit = CH_CONFIG.query.lost_devices_table_limit
         return out if loss_limit is None else out[:loss_limit]
 
+    def _kpi_calculator(self, kpi: KpiConfiguration, f: FilterRequest, events) -> PurposeKpiCalculator:
+        """The purpose rules with the period's records, for "events" and loss rules."""
+        losses = []
+        # Lost drones are a separate read, needed only by a rule that looks at them.
+        if any(rule.loss_rule != "ignore" for rule in kpi.purpose_rules):
+            try:
+                losses = self._lost_devices(f.model_copy(update={"result": []}))
+            except NotImplementedError:
+                pass
+        return PurposeKpiCalculator(kpi, events=events, losses=losses)
+
     def overview(self, f: FilterRequest, kpi: KpiConfiguration | None = None, *, calculator=None) -> list[Metric]:
         kpi = kpi or KpiConfiguration()
-        calculator = calculator or PurposeKpiCalculator(kpi)
         flights, events, ammo = self._dataset(f)
+        calculator = calculator or self._kpi_calculator(kpi, f, events)
+        penalized = _penalty_check(calculator)
         unique_flights = _unique_flight_rows(flights)
         total_flights = len(unique_flights)
 
@@ -389,6 +406,8 @@ class AnalyticsEngine:
             row for row in unique_flights if calculator.successful(row)
         ]
         effective = len(effective_rows)
+        # An unsuccessful flight that lost its drone, under a "penalty" rule, is a minus.
+        penalties = sum(1 for row in unique_flights if penalized(row))
 
         detected = sum(
             _as_int(x.get(AMMO_FIELDS["bc_count"]))
@@ -416,7 +435,7 @@ class AnalyticsEngine:
         destroyed_personnel = sum(
             _as_int(x.get(EVENT_FIELDS["field_200"])) for x in events if _is_personnel_event(x)
         )
-        efficiency = (effective / total_flights * 100.0) if total_flights else 0.0
+        efficiency = ((effective - penalties) / total_flights * 100.0) if total_flights else 0.0
 
         flight_group_counts: dict[str, Counter[str]] = defaultdict(Counter)
         flight_group_labels: dict[str, str] = {}
@@ -469,6 +488,7 @@ class AnalyticsEngine:
         device_by_flight = _device_type_by_flight(unique_flights)
         total_by_device: Counter[str] = Counter()
         effective_by_device: Counter[str] = Counter()
+        penalized_by_device: Counter[str] = Counter()
         for row in unique_flights:
             device_type = (
                 str(row.get(FLIGHT_FIELDS["device_type"]) or "").strip()
@@ -477,6 +497,8 @@ class AnalyticsEngine:
             total_by_device[device_type] += 1
             if calculator.successful(row):
                 effective_by_device[device_type] += 1
+            if penalized(row):
+                penalized_by_device[device_type] += 1
 
         effective_breakdown = _breakdown_items(dict(effective_by_device))
 
@@ -510,7 +532,7 @@ class AnalyticsEngine:
         for device_type, total in total_by_device.items():
             if total > 0:
                 efficiency_by_device[device_type] = (
-                    effective_by_device.get(device_type, 0) / total * 100.0
+                    (effective_by_device.get(device_type, 0) - penalized_by_device.get(device_type, 0)) / total * 100.0
                 )
         efficiency_breakdown = _breakdown_items(efficiency_by_device, unit="%")
 
@@ -595,9 +617,12 @@ class AnalyticsEngine:
         ]
 
     def timeline(self, f: FilterRequest, kpi: KpiConfiguration | None = None, *, calculator=None) -> list[TimelinePoint]:
-        calculator = calculator or PurposeKpiCalculator(kpi or KpiConfiguration())
-        flights, _, _ = self._dataset(f)
+        flights, events, _ = self._dataset(f)
+        calculator = calculator or self._kpi_calculator(kpi or KpiConfiguration(), f, events)
+        penalized = _penalty_check(calculator)
         flights = _unique_flight_rows(flights)
+        day_penalties: Counter[str] = Counter()
+        night_penalties: Counter[str] = Counter()
 
         day: Counter[str] = Counter()
         night: Counter[str] = Counter()
@@ -619,10 +644,14 @@ class AnalyticsEngine:
                 day[d] += 1
                 if calculator.successful(row):
                     day_effective[d] += 1
+                if penalized(row):
+                    day_penalties[d] += 1
             else:
                 night[d] += 1
                 if calculator.successful(row):
                     night_effective[d] += 1
+                if penalized(row):
+                    night_penalties[d] += 1
 
         points: list[TimelinePoint] = []
         for d in sorted(dates):
@@ -639,15 +668,15 @@ class AnalyticsEngine:
                     night=night_total,
                     day_effective=day_eff,
                     night_effective=night_eff,
-                    day_efficiency=round(day_eff / day_total * 100.0, 1) if day_total else 0.0,
-                    night_efficiency=round(night_eff / night_total * 100.0, 1) if night_total else 0.0,
+                    day_efficiency=round((day_eff - day_penalties[d]) / day_total * 100.0, 1) if day_total else 0.0,
+                    night_efficiency=round((night_eff - night_penalties[d]) / night_total * 100.0, 1) if night_total else 0.0,
                 )
             )
         return points
 
     def kpi_preview(self, f: FilterRequest, kpi: KpiConfiguration, source: str = "clickhouse"):
-        flights, _, _ = self._dataset(f)
-        return PurposeKpiCalculator(kpi).preview(_unique_flight_rows(flights), source)
+        flights, events, _ = self._dataset(f)
+        return self._kpi_calculator(kpi, f, events).preview(_unique_flight_rows(flights), source)
 
     def events(self, f: FilterRequest) -> list[EventRow]:
         if LOST_DEVICES_SENTINEL in f.result:

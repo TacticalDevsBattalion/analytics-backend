@@ -9,6 +9,7 @@ from app.bi.catalog import catalog
 from app.bi.models import BiModel, DashboardDefinition, DateRange, QueryFilter, WidgetDefinition
 from app.bi.security import dashboard_visible, require_permission, widget_visible
 from app.bi.store import get_bi_store
+from app.bi.page_cache import cached_page_response
 from app.bi.widgets import query_page, validate_widget
 from app.core.user_accounts import check_request_origin
 
@@ -98,4 +99,4 @@ def save_page(page: Page, body: DashboardDefinition, request: Request, user=Depe
 
 @router.post('/pages/{page}/query', operation_id='queryAnalyticsPage')
 def page_query(page: Page, body: PageQuery, user=Depends(principal)):
-    return operation(lambda: query_page(load_page(page, user), body, user, engine()))
+    return operation(lambda: cached_page_response(load_page(page, user), body, user, engine()))

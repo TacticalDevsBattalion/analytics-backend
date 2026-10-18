@@ -132,9 +132,9 @@ def kpi_options():
     principal = current_principal()
     if principal is not None and (principal.scope.scope_type != 'ALL' or principal.scope.filters):
         rows, _ = scoped_option_rows(principal)
-        return {'purposes': sorted({str(row['main_purpose']) for row in rows if row.get('main_purpose')}), 'results': sorted({str(row['main_result']) for row in rows if row.get('main_result')})}
+        return {'purposes': sorted({str(row['main_purpose']) for row in rows if row.get('main_purpose')}), 'results': sorted({str(row['main_result']) for row in rows if row.get('main_result')}), 'event_results': sorted({str(row['result']) for row in rows if row.get('result')})}
     return cache.get_or_load(
-        "api.kpi_options", _semantic_payload(source), clickhouse_analytics.kpi_options,
+        "api.kpi_options", {**_semantic_payload(source), "options": 2}, clickhouse_analytics.kpi_options,
         ttl_seconds=_cache_config().ttl_seconds.filter_options,
         stale_if_error_seconds=0, stale_while_revalidate=False,
         dependency_tags=cache_dependencies(),

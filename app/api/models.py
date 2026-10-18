@@ -71,20 +71,25 @@ class PurposeKpiPreview(BaseModel):
     purpose: str
     flights: int
     successful_flights: int
+    # Unsuccessful flights that lost the drone under a "penalty" rule.
+    penalized_flights: int = 0
+    # (successful − penalized) ÷ flights, %; negative when penalties outweigh.
     success_rate: float
     usefulness_percent: float
     coefficient: float
     usefulness_points: float
     weighted_flights: float
     weighted_efficiency: float | None
-    success_mode: Literal["source", "results"]
+    success_mode: Literal["source", "results", "events"]
     successful_results: list[str]
+    loss_rule: Literal["ignore", "unsuccessful", "penalty"] = "ignore"
 
 
 class KpiPreviewResponse(BaseModel):
     source: str
     total_flights: int
     successful_flights: int
+    penalized_flights: int = 0
     usefulness_points: float
     weighted_flights: float
     weighted_efficiency: float | None
@@ -94,6 +99,8 @@ class KpiPreviewResponse(BaseModel):
 class KpiOptions(BaseModel):
     purposes: list[str]
     results: list[str]
+    # Results of the records made during flights (detections, filming, follow-up).
+    event_results: list[str] = []
 
 
 class ComparisonRequest(BaseModel):

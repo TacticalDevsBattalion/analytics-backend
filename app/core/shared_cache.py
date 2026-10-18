@@ -581,6 +581,25 @@ class SharedCache:
         namespace = self._namespace(namespace)
         return self.invalidate_tags([f"__namespace__:{namespace}"])
 
+    def lease(self, name: str, owner: str, seconds: float) -> bool:
+        """Hold a named lease shared by all workers; renewing your own lease succeeds.
+
+        Without Redis each process is on its own and always gets the lease.
+        """
+        if not self._configured():
+            return True
+        key = f"{self._settings().cache_key_prefix}:lease:{self._namespace(name)}"
+        try:
+            if self._redis("set", key, owner, nx=True, px=int(seconds * 1000)):
+                return True
+            current = self._redis("get", key)
+            if current is not None and current.decode() == owner:
+                self._redis("pexpire", key, int(seconds * 1000))
+                return True
+            return False
+        except SharedCacheUnavailable:
+            return True
+
     def clear(self, namespace=None):
         if namespace is not None:
             self._namespace(namespace)

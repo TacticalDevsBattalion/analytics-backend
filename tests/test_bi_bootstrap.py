@@ -53,7 +53,7 @@ class BiBootstrapTests(unittest.TestCase):
         bootstrap(self.store)
         metrics = {item.key: item for item in self.store.list("metrics")}
         self.assertIn("flights", metrics)
-        self.assertEqual(metrics["efficiency"].numerator, "effective")
+        self.assertEqual(metrics["efficiency"].numerator, "effective_net")
         self.assertEqual(metrics["efficiency"].denominator, "flights")
         dashboards = self.store.list("dashboards")
         self.assertEqual({item.type for item in dashboards}, {"DASHBOARD", "STATISTICS"})
@@ -292,7 +292,7 @@ class BiBootstrapTests(unittest.TestCase):
         flights = self.store.find_by_key("metrics", "flights")
         self.assertEqual(flights.title, "Мої вильоти")  # administrator edit kept
         self.assertEqual(flights.description, METRIC_TEXTS["flights"][1])  # untouched empty description filled
-        self.assertEqual(efficiency.numerator, "effective")  # calculation unchanged
+        self.assertEqual(efficiency.numerator, "effective_net")  # stock calculation gets the loss minus
         revision = efficiency.revision
         bootstrap_metric_texts(self.store)
         self.assertEqual(self.store.find_by_key("metrics", "efficiency").revision, revision)

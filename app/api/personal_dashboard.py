@@ -15,6 +15,7 @@ from app.api.bi_routes import engine, no_store, operation, principal
 from app.bi.models import BiModel, DashboardDefinition, DateRange, LayoutOverrideInput, QueryFilter, UserLayoutOverride, WidgetDefinition
 from app.bi.security import require_permission, widget_visible
 from app.bi.store import BiConflict, BiNotFound, get_bi_store
+from app.bi.page_cache import cached_page_response
 from app.bi.widgets import query_page, validate_widget
 from app.core.user_accounts import PersonalDashboardPreferences, check_request_origin, get_user_account_store
 
@@ -169,7 +170,7 @@ def update_personal(body: PersonalUpdate, request: Request, user=Depends(princip
 
 @router.post('/personal-dashboard/query', operation_id='queryPersonalAnalyticsDashboard')
 def personal_query(body: PageQuery, user=Depends(principal)):
-    return operation(lambda: query_page(snapshot(user)['dashboard'], body, user, engine()))
+    return operation(lambda: cached_page_response(snapshot(user)['dashboard'], body, user, engine()))
 
 
 @router.post('/personal-dashboard/widgets', response_model=WidgetDefinition, operation_id='savePersonalAnalyticsWidget')

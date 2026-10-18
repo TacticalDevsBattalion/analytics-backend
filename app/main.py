@@ -86,6 +86,8 @@ def warm_runtime_cache() -> None:
         except Exception:
             logger.warning('Backend option cache warmup unavailable')
     Thread(target=legacy_warm, name='analytics-options-warm', daemon=True).start()
+    from app.bi import prewarm
+    prewarm.start()
     if os.getenv('CACHE_WARM_ON_STARTUP', 'false').lower() in {'1', 'true', 'yes'}:
         from app.bi.cache_admin import CacheWarmRequest, start_warming
         from app.bi.models import DataScope

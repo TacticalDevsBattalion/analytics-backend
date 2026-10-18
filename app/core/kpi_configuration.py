@@ -26,8 +26,13 @@ class KpiDataUnavailable(ValueError):
 class PurposeKpiRule(BaseModel):
     model_config = ConfigDict(extra="forbid")
     purpose: KpiText
-    success_mode: Literal["source", "results"] = "source"
+    # source: the source's own flag; results: the flight's main result is one of
+    # successful_results; events: any record of the flight has one of them.
+    success_mode: Literal["source", "results", "events"] = "source"
     successful_results: list[KpiText] = Field(default_factory=list, max_length=500)
+    # A lost drone: ignore; makes the flight unsuccessful; or, on an unsuccessful
+    # flight, also takes one successful flight off the effectiveness (a "minus").
+    loss_rule: Literal["ignore", "unsuccessful", "penalty"] = "ignore"
     usefulness_percent: float = Field(default=100, ge=0, le=100, allow_inf_nan=False, strict=True)
     coefficient: float = Field(default=1, ge=0, le=100, allow_inf_nan=False, strict=True)
 
@@ -36,7 +41,7 @@ class PurposeKpiRule(BaseModel):
         normalized = [normalize_kpi_text(value) for value in self.successful_results]
         if len(normalized) != len(set(normalized)):
             raise ValueError("Successful results must be unique after whitespace and case normalization")
-        if self.success_mode == "results" and not self.successful_results:
+        if self.success_mode in {"results", "events"} and not self.successful_results:
             raise ValueError("Choose at least one successful flight result")
         if self.success_mode == "source" and self.successful_results:
             raise ValueError("Source success mode does not use selected results")
@@ -62,6 +67,8 @@ def kpi_fingerprint(config: KpiConfiguration) -> str:
         "successful_results": sorted(normalize_kpi_text(value) for value in rule.successful_results),
         "usefulness_percent": float(rule.usefulness_percent),
         "coefficient": float(rule.coefficient),
+        # Omitted at its default so existing fingerprints (and caches) stay valid.
+        **({"loss_rule": rule.loss_rule} if rule.loss_rule != "ignore" else {}),
     } for rule in config.purpose_rules]
     rules.sort(key=lambda row: row["purpose"])
     encoded = json.dumps(rules, sort_keys=True, separators=(",", ":"), ensure_ascii=False)

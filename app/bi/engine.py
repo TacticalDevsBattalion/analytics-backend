@@ -52,13 +52,15 @@ ALIASES = {
     "status": "result",
     "zone": "units", "target_type": "target_class", "department_category": "device_type",
 }
-VIRTUAL_FIELDS = {"flights": {"norm_main_result", "local_timestamp", "mission_successful", "day_part"}, "events": {"norm_result", "norm_target_class", "is_personnel", "norm_bc_name", "local_timestamp"}, "ammunition": {"norm_result", "norm_bc_name", "local_timestamp"}, "lost_devices": {"norm_result", "local_timestamp"}}
+# Resolved per flight from the KPI rules (success, and the lost-drone "minus").
+MISSION_FIELDS = frozenset({"mission_successful", "mission_penalty"})
+VIRTUAL_FIELDS = {"flights": {"norm_main_result", "local_timestamp", *MISSION_FIELDS, "day_part"}, "events": {"norm_result", "norm_target_class", "is_personnel", "norm_bc_name", "local_timestamp"}, "ammunition": {"norm_result", "norm_bc_name", "local_timestamp"}, "lost_devices": {"norm_result", "local_timestamp"}}
 INHERITED_FLIGHT_FIELDS = SOURCE_FIELDS["flights"] - {"flight_id", "date"}
 ENRICHED_FIELDS = {"department_id", "group_id", "team_id", *INHERITED_FLIGHT_FIELDS, *ALIASES}
 # Exact coordinates are loaded for the map only; widgets cannot filter or group by them.
 COORDINATE_FIELDS = frozenset({"mgrs", "location_name"})
 FILTER_FIELDS = set().union(*SOURCE_FIELDS.values(), *VIRTUAL_FIELDS.values(), ENRICHED_FIELDS) - COORDINATE_FIELDS
-DIMENSION_FIELDS = FILTER_FIELDS - {"field_200", "field_300", "bc_count", "timestamp", "time_range", "time", "local_timestamp", "mission_successful"}
+DIMENSION_FIELDS = FILTER_FIELDS - {"field_200", "field_300", "bc_count", "timestamp", "time_range", "time", "local_timestamp", *MISSION_FIELDS}
 NUMERIC_FIELDS = {"bc_count", "field_200", "field_300", "is_effective"}
 FILTER_OPERATORS = {"eq", "neq", "in", "not_in", "gt", "gte", "lt", "lte", "contains", "not_contains", "is_null", "is_not_null", "between"}
 AGGREGATIONS = {"COUNT", "COUNT_DISTINCT", "SUM", "AVG", "MIN", "MAX", "RATIO", "FORMULA", "WEIGHTED_SUM"}
@@ -78,13 +80,18 @@ PRIMARY_FILTER_SOURCE = {
     **{field: "events" for field in ("result", "status", "target_class", "class_name", "target_id", "field_200", "field_300", "units", "unit", "flight_purpose", "flight_number", "id", "device_type_id", "row_hash", "time", "timestamp")},
     "bc_name": "ammunition", "bc_count": "ammunition",
     "norm_result": "events", "norm_target_class": "events", "is_personnel": "events", "norm_bc_name": "ammunition", "zone": "events", "target_type": "events",
-    "mission_successful": "flights", "day_part": "flights",
+    "mission_successful": "flights", "mission_penalty": "flights", "day_part": "flights",
 }
 RESTRICTED_BREAKDOWN_DIMENSIONS = {"purpose", "main_purpose", "flight_purpose", "category", "device_type", "department_category", "target_type", "target_class", "class_name", "date", "direction", "zone", "units"}
 
 
 def _normalized_text(value: Any) -> str | None:
     return re.sub(r"\s+", " ", str(value).strip().casefold()) if value is not None else None
+
+
+def _uses_mission_fields(request: dict[str, Any], dependencies: dict[str, dict[str, Any]]) -> bool:
+    conditions = request.get("filters", []) + [condition for metric in dependencies.values() for condition in metric.get("filters", [])]
+    return any(condition["field"] in MISSION_FIELDS for condition in conditions) or any(metric.get("field") in MISSION_FIELDS for metric in dependencies.values())
 
 
 def _supports_field(source: str, field: str) -> bool:
@@ -806,13 +813,13 @@ class QueryEngine:
             dataset = self._apply_scope(dataset, principal, request)
         start, end = (_date(request["date_range"][key]) for key in ("from", "to"))
         dataset = {source: [row for row in rows if not (source == "flights" and row.get("_bi_parent_context")) and (day := _date(row.get("date"))) is not None and start <= day <= end] for source, rows in dataset.items()}
-        dataset = _global_filters(dataset, [condition for condition in request["filters"] if condition["field"] != "mission_successful"])
+        dataset = _global_filters(dataset, [condition for condition in request["filters"] if condition["field"] not in MISSION_FIELDS])
         dimensions = request.get("dimensions", [])
         keys = [item["key"] for item in request["metrics"]]
         dependencies = self._dependencies(keys, definitions)
-        if any(condition["field"] == "mission_successful" for condition in request["filters"] + [condition for metric in dependencies.values() for condition in metric.get("filters", [])]) or any(metric.get("field") == "mission_successful" for metric in dependencies.values()):
+        if _uses_mission_fields(request, dependencies):
             dataset = self._mission_success_dataset(dataset)
-        success_filters = [condition for condition in request["filters"] if condition["field"] == "mission_successful"]
+        success_filters = [condition for condition in request["filters"] if condition["field"] in MISSION_FIELDS]
         if success_filters:
             dataset = _global_filters(dataset, success_filters)
         used_sources: set[str] = set()
@@ -1015,15 +1022,17 @@ class QueryEngine:
         for row in dataset.get("flights", []):
             events = events_by_flight.get(str(row["flight_id"]), []) if row.get("flight_id") is not None else []
             rule = resolve_rule(rules, mission_context(row, events), today=self.today())
+            penalty = False
             if rule is not None:
                 successful = row.get("is_effective") is True
             else:
                 if legacy is None:
                     from app.core.kpi_configuration import current_kpi_snapshot
                     from app.services.purpose_kpi import PurposeKpiCalculator
-                    legacy = PurposeKpiCalculator(current_kpi_snapshot().config)
+                    legacy = PurposeKpiCalculator(current_kpi_snapshot().config, events=dataset.get("events", []), losses=dataset.get("lost_devices", []))
                 successful = legacy.successful(row)
-            flights.append({**row, "mission_successful": successful})
+                penalty = legacy.penalized(row)
+            flights.append({**row, "mission_successful": successful, "mission_penalty": penalty})
         return {**dataset, "flights": flights}
 
     @staticmethod
@@ -1054,7 +1063,7 @@ class QueryEngine:
         dependencies = self._dependencies(keys, definitions)
         start, end = (date.fromisoformat(request["date_range"][key]) for key in ("from", "to"))
         tags = date_tags(start, end) + request.get("_cache_parent_tags", []) + ["dictionary"] + [f"{'kpi' if metric.get('kind') == 'kpi' else 'metric'}:{key}" for key, metric in dependencies.items()]
-        if any(condition['field'] == 'mission_successful' for condition in request.get('filters', []) + [condition for metric in dependencies.values() for condition in metric.get('filters', [])]) or any(metric.get('field') == 'mission_successful' for metric in dependencies.values()):
+        if _uses_mission_fields(request, dependencies):
             tags += ['kpi:mission', 'kpi:policy']
         relevant_weights = weights if any(metric["aggregation"] == "WEIGHTED_SUM" or metric.get("category_mode", "ALL") != "ALL" for metric in dependencies.values()) else []
         payload = {"request": request, "principal": principal.cache_key(), "definitions": dependencies, "weights": relevant_weights, "semantic": self.semantic_signature(), "cohort": cohort, "policy": asdict(self.cache_policy)}
@@ -1206,7 +1215,7 @@ class QueryEngine:
 
     def _needs_parent_context(self, request, definitions):
         dependencies = self._dependencies([ref["key"] for ref in request["metrics"]], definitions)
-        return any(metric.get("source", "flights") != "flights" or metric.get("field") == "mission_successful" for metric in dependencies.values()) or any(condition["field"] in PRIMARY_FILTER_SOURCE or condition["field"] == "mission_successful" for condition in request.get("filters", []) + [condition for metric in dependencies.values() for condition in metric.get("filters", [])])
+        return any(metric.get("source", "flights") != "flights" for metric in dependencies.values()) or _uses_mission_fields(request, dependencies) or any(condition["field"] in PRIMARY_FILTER_SOURCE for condition in request.get("filters", []) + [condition for metric in dependencies.values() for condition in metric.get("filters", [])])
 
     def _with_parent_tags(self, request, definitions, dataset_supplier, principal=None):
         if "_cache_parent_tags" in request:
@@ -1447,7 +1456,9 @@ def default_metric_definitions() -> list[Any]:
     definitions = [
         {"id": "system-metric-flights", "key": "flights", "title": "Польоти", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "direction": "HIGHER_IS_BETTER"},
         {"id": "system-metric-effective", "key": "effective", "title": "Результативні польоти", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "filters": [{"field": "mission_successful", "operator": "eq", "value": True}], "direction": "HIGHER_IS_BETTER"},
-        {"id": "system-metric-efficiency", "key": "efficiency", "title": "Результативність", "aggregation": "RATIO", "numerator": "effective", "denominator": "flights", "format": {"type": "percent", "decimals": 1}, "direction": "HIGHER_IS_BETTER", "percentage_difference": "percentage_points"},
+        {"id": "system-metric-penalized", "key": "penalized", "title": "Вильоти з втратою без результату", "aggregation": "COUNT_DISTINCT", "field": "flight_id", "filters": [{"field": "mission_penalty", "operator": "eq", "value": True}], "direction": "LOWER_IS_BETTER"},
+        {"id": "system-metric-effective-net", "key": "effective_net", "title": "Результативні з урахуванням втрат", "aggregation": "FORMULA", "formula": {"op": "sub", "args": [{"op": "coalesce", "args": [{"metric": "effective"}, {"value": 0}]}, {"op": "coalesce", "args": [{"metric": "penalized"}, {"value": 0}]}]}, "direction": "HIGHER_IS_BETTER"},
+        {"id": "system-metric-efficiency", "key": "efficiency", "title": "Результативність", "aggregation": "RATIO", "numerator": "effective_net", "denominator": "flights", "format": {"type": "percent", "decimals": 1}, "direction": "HIGHER_IS_BETTER", "percentage_difference": "percentage_points"},
         {"id": "system-metric-events", "key": "events", "title": "Події", "source": "events", "aggregation": "COUNT"},
         {"id": "system-metric-ammunition", "key": "ammunition", "title": "Витрати боєприпасів", "source": "ammunition", "aggregation": "SUM", "field": "bc_count", "filters": ammunition_spending_filters(), "direction": "LOWER_IS_BETTER"},
         {"id": "system-metric-lost", "key": "lost_devices", "title": "Втрати засобів", "source": "lost_devices", "aggregation": "COUNT", "direction": "LOWER_IS_BETTER"},

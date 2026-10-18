@@ -134,16 +134,20 @@ class SuccessCalculator:
     def __init__(self, dataset, service):
         resolved = service._mission_success_dataset(dataset)['flights']
         self.values = {id(original): computed['mission_successful'] for original, computed in zip(dataset.get('flights', []), resolved)}
+        self.penalties = {id(original) for original, computed in zip(dataset.get('flights', []), resolved) if computed.get('mission_penalty')}
 
     def successful(self, row):
         return self.values.get(id(row), False)
+
+    def penalized(self, row):
+        return id(row) in self.penalties
 
     def weights(self, row):
         return 0.0, 0.0  # Unselected private KPI values are not calculated.
 
 
 # Bumped when a report's payload changes, so cached reports are rebuilt.
-_BUILTIN_VERSIONS = {'map': 3, 'losses': 3}
+_BUILTIN_VERSIONS = {'map': 3, 'losses': 3, 'summary': 2, 'timeline': 2, 'average': 2, 'category': 2, 'purpose': 2}
 
 
 def builtin_result(widget, query, principal, service):

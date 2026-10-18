@@ -328,6 +328,35 @@ def bootstrap_position_board(store):
         connection.execute('INSERT INTO bi_bootstrap_versions VALUES (?,?)', (9, store._now()))
 
 
+def bootstrap_loss_penalty(store):
+    """Add the lost-drone "minus" to the stock effectiveness once; keep edited ones."""
+    from app.bi.engine import default_metric_definitions
+    from app.bi.metric_texts import updated_texts
+    from app.bi.reports import _calculation_fields
+    templates = {metric.key: metric for metric in default_metric_definitions()}
+    efficiency = templates['efficiency']
+    legacy = efficiency.model_copy(update={'numerator': 'effective'})
+    with store._connection() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        if connection.execute('SELECT 1 FROM bi_bootstrap_versions WHERE version=10').fetchone():
+            return
+        for key in ('penalized', 'effective_net'):
+            metric = templates[key]
+            if not connection.execute('SELECT 1 FROM metric_definitions WHERE metric_key=? OR id=?', (metric.key, metric.id)).fetchone():
+                store._save_record(connection, 'metrics', metric, 0)
+        for key in ('effective', 'efficiency'):
+            row = connection.execute('SELECT * FROM metric_definitions WHERE id=?', (templates[key].id,)).fetchone()
+            if row is None:
+                continue
+            current = store._decode('metrics', row, connection)
+            changes = updated_texts(current.key, current.title, current.description)
+            if key == 'efficiency' and _calculation_fields(current.model_dump(mode='json')) == _calculation_fields(legacy.model_dump(mode='json')):
+                changes['numerator'] = 'effective_net'
+            if changes:
+                store._save_record(connection, 'metrics', current.model_copy(update=changes), current.revision)
+        connection.execute('INSERT INTO bi_bootstrap_versions VALUES (?,?)', (10, store._now()))
+
+
 def bootstrap(store):
     _bootstrap_pages(store)
     bootstrap_success_semantics(store)
@@ -336,3 +365,4 @@ def bootstrap(store):
     bootstrap_ammunition_spending(store)
     bootstrap_positions(store)
     bootstrap_position_board(store)
+    bootstrap_loss_penalty(store)

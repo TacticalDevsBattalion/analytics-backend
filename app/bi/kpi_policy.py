@@ -220,8 +220,8 @@ def score_missions(dataset, principal, service, *, mode='CURRENT_RULE', rules=No
                     from app.services.clickhouse_analytics import clickhouse_analytics
                     clickhouse_analytics._require_kpi_fields(configuration)
                 legacy = PurposeKpiCalculator(configuration)
-            numerator, denominator = legacy.weights(row)
-            successful = legacy.successful(row)
+            numerator, denominator = legacy.weights(row, events, losses)
+            successful = legacy.successful(row, events, losses)
             legacy_rule = legacy.rule(row)
             result = {'score': numerator / denominator * 100 if denominator > 0 else None, 'rule_set_id': None, 'rule_version': (legacy_snapshot.revision if legacy_snapshot else None), 'calculation_mode': 'LEGACY', 'components': []}
             details = {'success_mode': legacy_rule.success_mode, 'usefulness_percent': legacy_rule.usefulness_percent, 'coefficient': legacy_rule.coefficient}

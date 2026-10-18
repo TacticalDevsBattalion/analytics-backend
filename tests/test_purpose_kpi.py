@@ -302,13 +302,14 @@ class PurposeKpiRouteTests(unittest.TestCase):
         response = self.client.post("/api/analytics/kpi-preview", json={"filters": filters().model_dump(mode="json"), "kpi": {"purpose_rules": [{"purpose": "Розвідка", "coefficient": 1000000}]}})
         self.assertEqual(response.status_code, 422)
 
-    def test_kpi_options_read_main_flight_results_not_event_results(self):
+    def test_kpi_options_keep_main_flight_results_apart_from_event_results(self):
         adapter = ClickHouseAnalytics()
         with patch.object(adapter, "_distinct_strings", side_effect=lambda entity, key: [f"{entity}.{key}"]) as distinct:
             values = adapter.kpi_options()
         self.assertEqual(values["purposes"], ["flight_list.main_purpose"])
         self.assertEqual(values["results"], ["flight_list.main_result"])
-        self.assertEqual([call.args for call in distinct.call_args_list], [("flight_list", "main_purpose"), ("flight_list", "main_result")])
+        self.assertEqual(values["event_results"], ["events.result"])
+        self.assertEqual([call.args for call in distinct.call_args_list], [("flight_list", "main_purpose"), ("flight_list", "main_result"), ("events", "result")])
 
     def test_missing_flight_result_field_cannot_be_reported_as_zero_success(self):
         adapter = ClickHouseAnalytics()

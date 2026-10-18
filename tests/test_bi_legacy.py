@@ -167,7 +167,7 @@ class LegacyScopeTests(unittest.TestCase):
             self.assertEqual(options["purpose"], ["own-purpose"])
             self.assertEqual(options["result"], ["positive"])
             kpi = analytics.kpi_options()
-            self.assertEqual(kpi, {"purposes": ["own-purpose"], "results": ["own-main-result"]})
+            self.assertEqual(kpi, {"purposes": ["own-purpose"], "results": ["own-main-result"], "event_results": []})
             self.assertEqual(source.call_count, 1)
 
     def test_unsupported_owner_and_custom_scopes_do_not_query_option_rows(self):

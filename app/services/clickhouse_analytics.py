@@ -468,6 +468,7 @@ class ClickHouseAnalytics(AnalyticsEngine):
         return {
             "purposes": [value for value in self._distinct_strings("flight_list", "main_purpose") if not _is_excluded_purpose(value)],
             "results": self._distinct_strings("flight_list", "main_result"),
+            "event_results": self._distinct_strings("events", "result"),
         }
 
     def schema_status(self) -> dict[str, Any]:
