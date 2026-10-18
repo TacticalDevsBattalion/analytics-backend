@@ -367,13 +367,36 @@ class PositionsTests(unittest.TestCase):
             table = widgets["stats-positions-table"]
             self.assertEqual(table.section, "positions")
             self.assertEqual([item.field for item in table.query.dimensions], ["category", "bbak_title", "position", "team"])
-            self.assertEqual([item.key for item in table.query.metrics], ["flights", "day_flights", "night_flights", "efficiency"])
+            self.assertEqual([item.key for item in table.query.metrics], ["flights", "day_flights", "night_flights", "effective", "efficiency"])
+            self.assertEqual(table.visualization.type, "position_board")
             self.assertIsNotNone(store.find_by_key("metrics", "night_flights"))
             self.assertEqual(store.get("widgets", "main-timeline").interaction.target_section, "positions")
             # A deleted widget is not restored.
             store.delete("widgets", table.id, table.revision)
             bootstrap(store)
             self.assertNotIn("stats-positions-table", {item.id for item in store.get("dashboards", "system-statistics").widgets})
+
+    def test_v8_positions_table_becomes_the_board_unless_edited(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            store = BiStore(os.path.join(directory, "bi.sqlite3"))
+            bootstrap(store)
+
+            def reset(metrics):
+                table = store.get("widgets", "stats-positions-table")
+                query = table.query.model_copy(update={"metrics": [type(table.query.metrics[0])(key=key) for key in metrics]})
+                store.save("widgets", table.model_copy(update={"query": query, "layout": table.layout.model_copy(update={"h": 14}), "visualization": table.visualization.model_copy(update={"type": "table"})}), table.revision)
+                with store._connection() as connection:
+                    connection.execute("DELETE FROM bi_bootstrap_versions WHERE version=9")
+                bootstrap(store)
+                return store.get("widgets", "stats-positions-table")
+
+            board = reset(["flights", "day_flights", "night_flights", "efficiency"])
+            self.assertEqual(board.visualization.type, "position_board")
+            self.assertEqual([item.key for item in board.query.metrics], ["flights", "day_flights", "night_flights", "effective", "efficiency"])
+            self.assertEqual(board.layout.h, 16)
+            edited = reset(["flights", "night_flights"])
+            self.assertEqual(edited.visualization.type, "table")
 
     def test_edited_timeline_click_is_kept(self):
         import os

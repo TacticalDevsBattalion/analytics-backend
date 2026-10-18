@@ -49,9 +49,12 @@ def _overview_widgets():
     ]
 
 
+_POSITION_KEYS = ['flights', 'day_flights', 'night_flights', 'effective', 'efficiency']
+
+
 def _position_widgets(top):
     # Statistics "Positions": who flew how much by day and night, per position.
-    table = _widget('stats-positions-table', 'Позиції: вильоти вдень і вночі', ['flights', 'day_flights', 'night_flights', 'efficiency'], dimensions=['category', 'bbak_title', 'position', 'team'], section='positions', layout={'x': 0, 'y': top + 6, 'w': 12, 'h': 14}, cross_filter=True)
+    table = _widget('stats-positions-table', 'Позиції: вильоти вдень і вночі', _POSITION_KEYS, dimensions=['category', 'bbak_title', 'position', 'team'], visualization='position_board', section='positions', layout={'x': 0, 'y': top + 6, 'w': 12, 'h': 16}, cross_filter=True)
     table.query.sort = [SortField(field='flights', direction='desc')]
     return [
         _widget('stats-positions-category', 'Вильоти вдень і вночі за кафедрами', ['day_flights', 'night_flights'], dimensions=['category'], visualization='stacked_bar', section='positions', layout={'x': 0, 'y': top, 'w': 12, 'h': 6}, cross_filter=True),
@@ -308,6 +311,23 @@ def bootstrap_positions(store):
         connection.execute('INSERT INTO bi_bootstrap_versions VALUES (?,?)', (8, store._now()))
 
 
+def bootstrap_position_board(store):
+    """Show the stock positions table as the grouped day/night board."""
+    with store._connection() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        if connection.execute('SELECT 1 FROM bi_bootstrap_versions WHERE version=9').fetchone():
+            return
+        row = connection.execute("SELECT * FROM dashboard_widgets WHERE id='stats-positions-table'").fetchone()
+        if row is not None:
+            widget = store._decode('widgets', row, connection)
+            # Only the widget as shipped in v8; one an administrator changed is left alone.
+            if widget.visualization.type == 'table' and [metric.key for metric in widget.query.metrics] == ['flights', 'day_flights', 'night_flights', 'efficiency']:
+                query = widget.query.model_copy(update={'metrics': [type(widget.query.metrics[0])(key=key) for key in _POSITION_KEYS]})
+                layout = widget.layout.model_copy(update={'h': max(widget.layout.h, 16)})
+                store._save_record(connection, 'widgets', widget.model_copy(update={'query': query, 'layout': layout, 'visualization': widget.visualization.model_copy(update={'type': 'position_board'})}), widget.revision)
+        connection.execute('INSERT INTO bi_bootstrap_versions VALUES (?,?)', (9, store._now()))
+
+
 def bootstrap(store):
     _bootstrap_pages(store)
     bootstrap_success_semantics(store)
@@ -315,3 +335,4 @@ def bootstrap(store):
     bootstrap_overview_widgets(store)
     bootstrap_ammunition_spending(store)
     bootstrap_positions(store)
+    bootstrap_position_board(store)
