@@ -143,7 +143,7 @@ class SuccessCalculator:
 
 
 # Bumped when a report's payload changes, so cached reports are rebuilt.
-_BUILTIN_VERSIONS = {'map': 2}
+_BUILTIN_VERSIONS = {'map': 3}
 
 
 def builtin_result(widget, query, principal, service):

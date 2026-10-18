@@ -49,16 +49,31 @@ class TargetTests(unittest.TestCase):
 
 
 class LineTests(unittest.TestCase):
-    def test_parses_wkt_and_skips_missing_views(self):
+    def test_parses_wkt(self):
         self.assertEqual(wkt_to_geometry("LINESTRING(31.7 52.1,31.8 52.2)"), {"type": "LineString", "coordinates": [[31.7, 52.1], [31.8, 52.2]]})
         self.assertEqual(wkt_to_geometry("MULTIPOLYGON(((1 2,3 4,5 6,1 2)),((7 8,9 10,11 12,7 8)))")["coordinates"][1][0][2], [11.0, 12.0])
         self.assertIsNone(wkt_to_geometry("POINT(1 2)"))
 
+    def test_occupied_territory_is_the_country_outside_the_controlled_area(self):
+        # Country 0..10 × 0..10; controlled west part x < 6 (and a hair beyond the border).
         def query(sql):
+            if "country" in sql:
+                return [{"geom": "MULTIPOLYGON(((0 0,10 0,10 10,0 10,0 0)))", "valid_from": "2026-09-05 09:42:12"}]
             if "front_line" in sql:
-                raise RuntimeError("missing view")
-            return [{"id": 1, "label": None, "geom": "MULTILINESTRING((1 2,3 4),(5 6,7 8))", "valid_from": "2026-10-17 09:02:48.644"}]
-        lines = load_lines(query)
-        self.assertEqual(len(lines["features"]), 1)
-        self.assertEqual(lines["features"][0]["properties"], {"layer": "flet", "title": "FLET", "valid_from": "2026-10-17 09:02"})
-        self.assertEqual(lines["features"][0]["geometry"]["type"], "MultiLineString")
+                return [{"geom": "POLYGON((-0.0001 -0.0001,6 -0.0001,6 10.0001,-0.0001 10.0001,-0.0001 -0.0001))", "valid_from": "2026-10-17 09:02:48.786"}]
+            raise AssertionError(sql)
+        features = {feature["properties"]["layer"]: feature for feature in load_lines(query)["features"]}
+        self.assertEqual(set(features), {"occupied", "front_line"})
+        from shapely.geometry import Point, shape
+        occupied = shape(features["occupied"]["geometry"])
+        self.assertTrue(occupied.contains(Point(8, 5)))
+        self.assertFalse(occupied.contains(Point(3, 5)))
+        # The front is the x = 6 edge only, not the state border.
+        front = shape(features["front_line"]["geometry"])
+        self.assertAlmostEqual(front.length, 10, delta=0.01)
+        self.assertEqual(features["occupied"]["properties"]["valid_from"], "2026-10-17 09:02")
+
+    def test_missing_views_give_no_layers(self):
+        def query(sql):
+            raise RuntimeError("missing view")
+        self.assertEqual(load_lines(query)["features"], [])

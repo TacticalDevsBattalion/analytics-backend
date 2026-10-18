@@ -5,3 +5,4 @@ httpx>=0.28,<1
 PyJWT[crypto]>=2.10,<3
 tzdata>=2025.1
 redis>=5.2,<8
+shapely>=2.0,<3

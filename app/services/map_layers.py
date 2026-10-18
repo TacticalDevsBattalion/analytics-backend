@@ -155,11 +155,15 @@ def target_features(events: Iterable[dict[str, Any]], *, affected: str, destroye
 
 # --- Lines ---------------------------------------------------------------------
 
-LINE_LAYERS = (
-    # (layer, ClickHouse view, geometry column, title)
-    ("flet", "dwh.v_geo_flet_current", "geom", "FLET"),
-    ("front_line", "dwh.v_geo_front_line_current", "geom", "Лінія фронту"),
-)
+# Ukraine's border and the territory under Ukrainian control (the "front line"
+# view holds the controlled area as a polygon). The map shows what lies between
+# them: the occupied territory and the front line, as on DeepState.
+COUNTRY_VIEW = "dwh.v_geo_country_current"
+CONTROLLED_VIEW = "dwh.v_geo_front_line_current"
+# Border slivers smaller than this (square degrees, about 20 km²) are noise of the
+# two outlines, not occupied land.
+_MIN_OCCUPIED_AREA = 0.002
+_SIMPLIFY = 0.0003
 
 
 def _wkt_coordinates(text: str) -> Any:
@@ -186,19 +190,48 @@ def wkt_to_geometry(wkt: str) -> dict[str, Any] | None:
     return {"type": kind, "coordinates": coordinates} if coordinates else None
 
 
+def occupied_layers(country: dict[str, Any], controlled: dict[str, Any]) -> list[dict[str, Any]]:
+    """Occupied territory = country minus controlled area; the front is their shared edge."""
+    from shapely.geometry import MultiPolygon, mapping, shape
+
+    country_shape, controlled_shape = shape(country), shape(controlled)
+    country_shape = country_shape if country_shape.is_valid else country_shape.buffer(0)
+    controlled_shape = controlled_shape if controlled_shape.is_valid else controlled_shape.buffer(0)
+    difference = country_shape.difference(controlled_shape)
+    parts = [part for part in getattr(difference, "geoms", [difference]) if part.geom_type == "Polygon" and part.area >= _MIN_OCCUPIED_AREA]
+    if not parts:
+        return []
+    occupied = MultiPolygon(parts)
+    front = controlled_shape.boundary.intersection(occupied.buffer(0.002))
+    layers = [{"type": "Feature", "geometry": mapping(occupied.simplify(_SIMPLIFY)), "properties": {"layer": "occupied", "title": "Окупована територія"}}]
+    if not front.is_empty:
+        layers.append({"type": "Feature", "geometry": mapping(front.simplify(_SIMPLIFY)), "properties": {"layer": "front_line", "title": "Лінія фронту"}})
+    return layers
+
+
 def load_lines(query) -> dict[str, Any]:
-    """Current FLET and front line; a missing view is skipped, not an error."""
-    features = []
-    for layer, view, column, title in LINE_LAYERS:
+    """Occupied territory and the front line; missing data or geometry support is skipped."""
+    import logging
+
+    def current(view):
         try:
-            rows = query(f"SELECT id, label, {column} AS geom, toString(valid_from) AS valid_from FROM {view}")
+            rows = query(f"SELECT geom, toString(valid_from) AS valid_from FROM {view} ORDER BY valid_from DESC LIMIT 1")
         except Exception:
-            continue
-        for row in rows:
-            geometry = wkt_to_geometry(_text(row.get("geom")))
-            if geometry:
-                features.append({"type": "Feature", "geometry": geometry, "properties": {
-                    "layer": layer, "title": _text(row.get("label")) or title, "valid_from": _text(row.get("valid_from"))[:16]}})
+            return None, ""
+        if not rows:
+            return None, ""
+        return wkt_to_geometry(_text(rows[0].get("geom"))), _text(rows[0].get("valid_from"))[:16]
+
+    country, _ = current(COUNTRY_VIEW)
+    controlled, valid_from = current(CONTROLLED_VIEW)
+    features = []
+    if country and controlled:
+        try:
+            features = occupied_layers(country, controlled)
+        except Exception:
+            logging.getLogger(__name__).warning("map_occupied_territory_failed", exc_info=True)
+        for feature in features:
+            feature["properties"]["valid_from"] = valid_from
     return {"type": "FeatureCollection", "features": features}
 
 
@@ -209,4 +242,4 @@ def map_lines() -> dict[str, Any]:
 
     if get_settings().active_source != "clickhouse":
         return {"type": "FeatureCollection", "features": []}
-    return cache.get_or_load("api.map_lines", {"layers": [layer[:3] for layer in LINE_LAYERS]}, lambda: load_lines(clickhouse_client.query), ttl_seconds=300)
+    return cache.get_or_load("api.map_lines", {"layers": [COUNTRY_VIEW, CONTROLLED_VIEW], "version": 2}, lambda: load_lines(clickhouse_client.query), ttl_seconds=300)
