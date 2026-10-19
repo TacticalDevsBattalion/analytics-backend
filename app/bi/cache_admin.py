@@ -1,6 +1,7 @@
 """Permission-checked cache invalidation and persistent background warming jobs."""
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import time
@@ -21,6 +22,7 @@ from app.core.config import get_backend_config, get_settings
 logger = logging.getLogger(__name__)
 _warming_lock = Lock()
 _running_jobs: set[str] = set()
+WARM_CHUNK_DAYS = 31
 
 
 class CacheInvalidation(BiModel):
@@ -88,7 +90,21 @@ def warm_queries(body: CacheWarmRequest) -> list[QueryRequest]:
         if 'CUSTOM' in body.periods and (body.date_range.date_from < oldest or body.date_range.date_to > end):
             raise QueryError('Custom warming must stay within the retained cache horizon through today')
         ranges['CUSTOM'] = (body.date_range.date_from, body.date_range.date_to)
-    return [QueryRequest.model_validate({'metrics': [{'key': key} for key in body.metric_keys], 'dimensions': [{'field': 'date', 'granularity': 'day'}, {'field': 'department'}], 'date_range': {'from': ranges[period][0], 'to': ranges[period][1]}}) for period in body.periods if ranges[period][0] <= ranges[period][1]]
+    return [QueryRequest.model_validate({'metrics': [{'key': key} for key in body.metric_keys], 'dimensions': [{'field': 'date', 'granularity': 'day'}, {'field': 'department'}], 'date_range': {'from': start, 'to': end}})
+            for period in body.periods for start, end in _chunks(*ranges[period])]
+
+
+def _chunks(start: date, end: date) -> list[tuple[date, date]]:
+    """Split a long period into parts of at most WARM_CHUNK_DAYS.
+
+    Data is cached by day, so the parts warm exactly the same entries, while one
+    120-day query held over 2 GB at once and could get the pod killed for memory.
+    """
+    parts = []
+    while start <= end:
+        parts.append((start, min(end, start + timedelta(days=WARM_CHUNK_DAYS - 1))))
+        start += timedelta(days=WARM_CHUNK_DAYS)
+    return parts
 
 
 def warming_limits() -> tuple[int, int]:
@@ -141,6 +157,7 @@ def start_warming(body: CacheWarmRequest, principal) -> dict:
                     return
                 service.execute(query, principal)
                 completed += 1
+                gc.collect()  # Free the part's rows before the next one is loaded.
                 store.update_cache_job(job['id'], 'running', completed, lease_owner=owner)
                 if time.monotonic() >= deadline:
                     store.update_cache_job(job['id'], 'failed', completed, 'timeout', lease_owner=owner)

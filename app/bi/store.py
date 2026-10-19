@@ -254,7 +254,7 @@ class BiStore:
             return self._expire_cache_jobs(connection, time.time())
 
     def create_cache_job(self, request: dict, user_id: str | None, total_queries: int, *, lease_owner: str | None = None, lease_seconds: float = 90, max_runtime_seconds: float = 300, max_active: int = 2) -> dict:
-        if not 1 <= total_queries <= 4 or not 1 <= max_active <= 2 or not 1 <= lease_seconds <= 300 or not 1 <= max_runtime_seconds <= 900:
+        if not 1 <= total_queries <= 512 or not 1 <= max_active <= 2 or not 1 <= lease_seconds <= 300 or not 1 <= max_runtime_seconds <= 900:
             raise ValueError('Invalid cache warming reservation bounds')
         job_id = uuid.uuid4().hex
         now = self._now()

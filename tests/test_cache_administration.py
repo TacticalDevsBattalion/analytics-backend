@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -66,6 +66,11 @@ class CacheAdministrationTests(unittest.TestCase):
             queries = warm_queries(CacheWarmRequest(metric_keys=['flights']))
         self.assertEqual(queries[0].date_range.date_from, date(2026, 10, 1))
         self.assertEqual(queries[1].date_range.date_to, date(2026, 9, 30))
+        # The 120-day horizon is warmed in parts of at most 31 days that cover it exactly.
+        horizon = [(query.date_range.date_from, query.date_range.date_to) for query in queries[2:]]
+        self.assertEqual((horizon[0][0], horizon[-1][1]), (date(2026, 6, 8), date(2026, 10, 5)))
+        self.assertTrue(all((end - start).days < 31 for start, end in horizon))
+        self.assertTrue(all(horizon[i][1] + timedelta(days=1) == horizon[i + 1][0] for i in range(len(horizon) - 1)))
         job = self.store.create_cache_job({'periods': ['CURRENT_MONTH']}, 'admin', 3)
         self.assertEqual(BiStore(self.store.path).cache_job(job['id'])['status'], 'queued')
         self.store.update_cache_job(job['id'], 'running', 1)
