@@ -22,6 +22,7 @@ from app.bi.cache_policy import date_tags
 from app.bi.engine import _canonical
 from app.bi.widgets import query_page
 from app.core.cache import cache
+from app.core.memory import heavy_slot
 
 NAMESPACE = 'bi.page'
 VERSION = 1
@@ -66,11 +67,15 @@ def page_json(definition, body, user, service, *, serve_stale=True) -> bytes:
     start, end = body.date_range.date_from, body.date_range.date_to
     ttl = service.cache_policy.ttl_for_range(start, end, service.today())
     if ttl <= 0:
-        return _json(query_page(definition, body, user, service))
+        with heavy_slot():
+            return _json(query_page(definition, body, user, service))
     signature, tags = page_signature(definition, body, user, service)
 
     def compute():
-        content = _json(query_page(definition, body, user, service))
+        # Two pages at a time: each holds the period's rows (~0.5 GB a month), and
+        # being CPU-bound they would not finish sooner side by side anyway.
+        with heavy_slot():
+            content = _json(query_page(definition, body, user, service))
         # A widget that failed (source unavailable, timeout) must not stick for the TTL.
         if b'"status":"error"' in content and any(item['status'] == 'error' for item in json.loads(content)['results']):
             raise _Uncacheable(content)

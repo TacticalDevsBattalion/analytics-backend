@@ -4,6 +4,8 @@ import tempfile
 import threading
 import time
 import unittest
+
+from app.core import database
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
@@ -82,6 +84,7 @@ class CacheJobLeaseTests(unittest.TestCase):
         with self.assertRaises(BiConflict):
             self.store.update_cache_job(job['id'], 'running', 0, lease_owner='worker-a')
 
+    @unittest.skipIf(database.postgres_enabled(), "builds an old SQLite file to test its upgrade")
     def test_upgrade_marks_unleased_old_active_jobs_interrupted(self):
         old_path = self.path.with_name('legacy.sqlite3')
         connection = sqlite3.connect(old_path)

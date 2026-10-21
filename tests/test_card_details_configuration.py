@@ -3,6 +3,8 @@ import os
 import sqlite3
 import tempfile
 import unittest
+
+from app.core import database
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
@@ -50,7 +52,7 @@ class CardDetailsFixture:
         return ApplicationConfiguration.model_validate(value)
 
     def persisted_rows(self):
-        with closing(sqlite3.connect(self.path)) as connection:
+        with closing(database.connect(self.path, 'configuration')) as connection:
             return {
                 "versions": connection.execute("SELECT revision, config_json, created_at, action FROM configuration_versions ORDER BY revision").fetchall(),
                 "state": connection.execute("SELECT id, active_revision, draft_version FROM configuration_state").fetchall(),
@@ -77,6 +79,7 @@ class CardDetailsConfigurationTests(CardDetailsFixture, unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 self.configuration(value)
 
+    @unittest.skipIf(database.postgres_enabled(), "builds an old SQLite file to test its upgrade")
     def test_old_published_draft_and_history_receive_defaults_without_rewriting_database_rows(self):
         historical = self.seed.model_dump(mode="json")
         historical["appearance"].pop("card_details")

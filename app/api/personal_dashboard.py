@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import Field
 
 from app.api.analytics_pages import PageQuery, load_page
@@ -162,7 +162,7 @@ def update_personal(body: PersonalUpdate, request: Request, user=Depends(princip
                     connection.execute('DELETE FROM dashboard_user_overrides WHERE dashboard_id=? AND user_id=? AND widget_id=?', (DASHBOARD, user_id, widget_id))
                 for item in body.overrides:
                     store._save_record(connection, 'overrides', UserLayoutOverride(dashboard_id=DASHBOARD, user_id=user_id, widget_id=item.widget_id, layout=item.layout), 0)
-                connection.execute('INSERT INTO dashboard_override_revisions VALUES (?,?,1) ON CONFLICT(dashboard_id,user_id) DO UPDATE SET revision=revision+1', (DASHBOARD, user_id))
+                connection.execute('INSERT INTO dashboard_override_revisions VALUES (?,?,1) ON CONFLICT(dashboard_id,user_id) DO UPDATE SET revision=dashboard_override_revisions.revision+1', (DASHBOARD, user_id))
             put_preferences(connection, user_id, values, revision + 1, migrated)
         return snapshot(user)
     return operation(run)
@@ -314,16 +314,11 @@ async def upload_asset(request: Request, user=Depends(principal)):
     def run():
         store = get_bi_store()
         identifier = uuid.uuid4().hex
-        directory = store.path.parent / 'dashboard-assets'
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / identifier
-        path.write_bytes(data)
-        try:
-            with store._connection() as connection:
-                connection.execute('INSERT INTO dashboard_assets VALUES (?,?,?,?,?)', (identifier, user_id, content_type, size, store._now()))
-        except BaseException:
-            path.unlink(missing_ok=True)
-            raise
+        # The image is kept in the database, so the pod needs no data on its disk.
+        with store._connection() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            connection.execute('INSERT INTO dashboard_assets VALUES (?,?,?,?,?)', (identifier, user_id, content_type, size, store._now()))
+            connection.execute('INSERT INTO dashboard_asset_content VALUES (?,?)', (identifier, data))
         return {'asset_id': identifier, 'url': f'/api/v1/analytics/assets/{identifier}'}
     return operation(run)
 
@@ -335,10 +330,15 @@ def get_asset(asset_id: str, user=Depends(principal)):
         store = get_bi_store()
         with store._connection() as connection:
             row = connection.execute('SELECT * FROM dashboard_assets WHERE id=? AND user_id=?', (asset_id, user_id)).fetchone()
+            content = connection.execute('SELECT content FROM dashboard_asset_content WHERE id=?', (asset_id,)).fetchone() if row is not None else None
         if row is None:
             raise BiNotFound('Background asset was not found')
+        headers = {'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store'}
+        if content is not None:
+            return Response(bytes(content[0]), media_type=row['content_type'], headers=headers)
+        # Images uploaded before they were kept in the database.
         path = store.path.parent / 'dashboard-assets' / row['id']
         if not path.is_file():
             raise BiNotFound('Background asset was not found')
-        return FileResponse(path, media_type=row['content_type'], headers={'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'private, no-store'})
+        return FileResponse(path, media_type=row['content_type'], headers=headers)
     return operation(run)

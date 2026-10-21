@@ -257,18 +257,19 @@ class ApplicationConfigurationStore:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(str(self.path), timeout=10, isolation_level=None)
-        connection.row_factory = sqlite3.Row
+        from app.core import database
+        connection = database.TrackedConnection(database.connect(self.path, "configuration"))
         try:
             # This serializes competing writes and gives snapshots one revision.
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("CREATE TABLE IF NOT EXISTS configuration_versions (revision INTEGER PRIMARY KEY, config_json TEXT NOT NULL, created_at TEXT NOT NULL, action TEXT NOT NULL)")
-            connection.execute("CREATE TABLE IF NOT EXISTS configuration_state (id INTEGER PRIMARY KEY CHECK(id = 1), active_revision INTEGER NOT NULL, draft_version INTEGER NOT NULL DEFAULT 0)")
-            state_columns = {row["name"] for row in connection.execute("PRAGMA table_info(configuration_state)")}
-            if "draft_version" not in state_columns:
-                connection.execute("ALTER TABLE configuration_state ADD COLUMN draft_version INTEGER NOT NULL DEFAULT 0")
-            connection.execute("CREATE TABLE IF NOT EXISTS configuration_draft (id INTEGER PRIMARY KEY CHECK(id = 1), config_json TEXT NOT NULL, base_revision INTEGER NOT NULL)")
+            # The PostgreSQL schema is created by app/migrations/postgres.
+            if not database.is_postgres(connection):
+                connection.execute("CREATE TABLE IF NOT EXISTS configuration_versions (revision INTEGER PRIMARY KEY, config_json TEXT NOT NULL, created_at TEXT NOT NULL, action TEXT NOT NULL)")
+                connection.execute("CREATE TABLE IF NOT EXISTS configuration_state (id INTEGER PRIMARY KEY CHECK(id = 1), active_revision INTEGER NOT NULL, draft_version INTEGER NOT NULL DEFAULT 0)")
+                state_columns = {row["name"] for row in connection.execute("PRAGMA table_info(configuration_state)")}
+                if "draft_version" not in state_columns:
+                    connection.execute("ALTER TABLE configuration_state ADD COLUMN draft_version INTEGER NOT NULL DEFAULT 0")
+                connection.execute("CREATE TABLE IF NOT EXISTS configuration_draft (id INTEGER PRIMARY KEY CHECK(id = 1), config_json TEXT NOT NULL, base_revision INTEGER NOT NULL)")
             if connection.execute("SELECT active_revision FROM configuration_state WHERE id = 1").fetchone() is None:
                 connection.execute("INSERT INTO configuration_versions VALUES (?, ?, ?, ?)", (1, self.defaults().model_dump_json(), self._now(), "initial"))
                 connection.execute("INSERT INTO configuration_state (id, active_revision, draft_version) VALUES (1, 1, 0)")
@@ -279,6 +280,16 @@ class ApplicationConfigurationStore:
             raise
         finally:
             connection.close()
+            if connection.wrote:
+                self._reads().invalidate()
+
+    def _reads(self):
+        from app.core import database
+        return database.read_cache(database.location(self.path) + ":configuration")
+
+    def _state(self) -> tuple[int, int]:
+        with self._transaction() as connection:
+            return self._active_revision(connection), self._draft_version(connection)
 
     @staticmethod
     def _now() -> str:
@@ -316,8 +327,16 @@ class ApplicationConfigurationStore:
         )
 
     def snapshot(self) -> AdministrationSnapshot:
-        with self._transaction() as connection:
-            return self._snapshot(connection)
+        # Read on every request; reused while the published revision and draft are unchanged.
+        cache = self._reads()
+        state = cache.current(self._state)
+        hit, value = cache.get("snapshot", state)
+        if not hit:
+            with self._transaction() as connection:
+                value = self._snapshot(connection)
+            if (value.revision, value.draft_version) == state:
+                cache.put("snapshot", state, value)
+        return value.model_copy(deep=True)
 
     def save_draft(self, config: ApplicationConfiguration, base_revision: int, expected_draft_version: int | None = None) -> AdministrationSnapshot:
         # Revalidate copies even when callers constructed a model without validation.

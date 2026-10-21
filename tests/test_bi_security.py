@@ -2,6 +2,8 @@
 import sqlite3
 import tempfile
 import unittest
+
+from app.core import database
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -115,7 +117,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(saved.version, 2)
         restarted = BiStore(self.path)
         self.assertEqual(restarted.get("dashboards", saved.id).widgets[0].id, "widget-one")
-        connection = sqlite3.connect(self.path)
+        connection = database.connect(self.path, 'bi')
         try:
             versions = {row[0] for row in connection.execute("SELECT version FROM bi_schema_migrations")}
             self.assertTrue({1, 2, 3}.issubset(versions))

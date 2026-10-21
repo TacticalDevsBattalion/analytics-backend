@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from functools import lru_cache
 import re
 from datetime import date, datetime, time
 from typing import Any
@@ -96,8 +97,18 @@ def _as_int(value: Any) -> int:
             return 0
 
 
+_SPACES = re.compile(r"\s+")
+_SEPARATORS = re.compile(r"[\s_\-/]+")
+
+
 def _normalized_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+    # The same few thousand names repeat on every row; normalize each one once.
+    return _normalize_str(value if value.__class__ is str else str(value or ""))
+
+
+@lru_cache(maxsize=65536)
+def _normalize_str(value: str) -> str:
+    return _SPACES.sub(" ", value.strip().casefold())
 
 
 def _is_excluded_purpose(value: Any) -> bool:
@@ -105,8 +116,14 @@ def _is_excluded_purpose(value: Any) -> bool:
 
 
 def _is_personnel_event(row: dict[str, Any]) -> bool:
-    raw = str(row.get(EVENT_FIELDS["target_class"]) or "").strip().casefold()
-    normalized = re.sub(r"[\s_\-/]+", " ", raw).strip()
+    value = row.get(EVENT_FIELDS["target_class"])
+    return _is_personnel_class(value if value.__class__ is str else str(value or ""))
+
+
+@lru_cache(maxsize=4096)
+def _is_personnel_class(value: str) -> bool:
+    raw = value.strip().casefold()
+    normalized = _SEPARATORS.sub(" ", raw).strip()
     if normalized in PERSONNEL_TARGET_CLASSES:
         return True
     return any(
@@ -116,8 +133,11 @@ def _is_personnel_event(row: dict[str, Any]) -> bool:
 
 
 def _flight_purpose_group(value: Any, device_type: Any = None) -> tuple[str, str]:
-    purpose = _normalized_text(value)
-    normalized_device_type = _normalized_text(device_type)
+    return _purpose_group(_normalized_text(value), _normalized_text(device_type))
+
+
+@lru_cache(maxsize=16384)
+def _purpose_group(purpose: str, normalized_device_type: str) -> tuple[str, str]:
 
     followup = ANALYTICS_CONFIG.followup_recon
     if (

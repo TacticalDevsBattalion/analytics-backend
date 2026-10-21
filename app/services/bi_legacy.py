@@ -87,7 +87,8 @@ def hierarchy_options(principal):
             continue
         if department in departments or can_departments:
             output['departments'][department] = {'id': department, 'title': str(row.get('bbak_title') or department)}
-        if group is not None and department in departments:
+        # Companies of other battalions are peers too: a company commander compares across the brigade.
+        if group is not None and (department in departments or can_groups):
             if (department, group) in groups or can_groups:
                 output['groups'][(department, group)] = {'id': group, 'title': str(row.get('rota_title') or group), 'department_id': department}
         if team is not None and group is not None:

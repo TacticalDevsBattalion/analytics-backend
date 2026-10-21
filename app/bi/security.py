@@ -31,6 +31,8 @@ PERMISSIONS = (
     'comparison.category', 'comparison.unit', 'comparison.crew',
     # Exact coordinates of struck and destroyed targets on the map.
     'map.coordinates',
+    # Own crews' places among all crews of the brigade, without other crews' names.
+    'ranking.view',
 )
 PERMISSION_ALIASES = {
     'dashboard.admin_edit': 'dashboard.manage', 'statistics.admin_edit': 'dashboard.manage',
@@ -120,6 +122,12 @@ def principal_for_user(user, store: BiStore | None = None) -> Principal:
     if user.role == "administrator":
         return Principal(user.id, user.role, frozenset({"*"}), DataScope(scope_type="ALL"), "EXACT")
     access = store.user_access(user.id)
+    if access.profile is not None and access.profile != "admin":
+        from app.bi import access_profiles
+        # A profile alone decides permissions and scope; differences are exact.
+        return Principal(user.id, user.role, access_profiles.permissions_for(access.profile, access.coordinates),
+                         access_profiles.scope_for(access.profile, access.battalion_id, access.company_id), "EXACT",
+                         frozenset(), frozenset({"profile:" + access.profile}), access.revision, frozenset())
     permissions = set(access.permissions)
     keys = set()
     for role_id in access.role_ids:
@@ -144,7 +152,30 @@ def resolve_principal(request: Request, store: BiStore | None = None) -> Princip
     if not keycloak_enabled() and not account_operation(lambda: get_user_account_store().enabled()):
         return Principal(None, "viewer", DEFAULT_VIEWER_PERMISSIONS, DataScope(scope_type="ALL"))
     user = require_signed_user(request)
+    target = request.headers.get(VIEW_AS_HEADER, "").strip()
+    if target and target != user.id:
+        return _view_as(request, user, target, store)
     return principal_for_user(user, store)
+
+
+VIEW_AS_HEADER = "x-analytics-view-as"
+# POST requests that only read: queries, previews, comparisons and options.
+_READ_ONLY_POSTS = ("/query", "/query/batch", "/comparison", "/ranking", "/catalog/options", "/kpi/missions", "/widgets/preview",
+                    "/analytics/overview", "/analytics/kpi-preview", "/analytics/timeline", "/analytics/events",
+                    "/analytics/map", "/simulate")
+
+
+def _view_as(request: Request, user, target: str, store: BiStore | None) -> Principal:
+    """An administrator sees the application with another user's access, read-only."""
+    if user.role != "administrator":
+        raise HTTPException(status_code=403, detail="Only administrators can view the application as another user")
+    path = request.url.path.rstrip("/")
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and not (request.method == "POST" and path.endswith(_READ_ONLY_POSTS)):
+        raise HTTPException(status_code=403, detail="Viewing as another user is read-only")
+    account = next((item for item in account_operation(lambda: get_user_account_store().users()) if item.id == target and item.active), None)
+    if account is None:
+        raise HTTPException(status_code=404, detail="Account was not found")
+    return principal_for_user(account, store)
 
 
 def require_permission(principal: Principal, permission: str) -> None:

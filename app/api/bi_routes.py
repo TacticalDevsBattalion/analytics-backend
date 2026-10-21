@@ -26,6 +26,7 @@ from app.core.user_accounts import account_operation, get_user_account_store
 from app.core.user_accounts import check_request_origin
 from app.bi.cache_admin import CacheInvalidation, CacheWarmRequest
 from app.core.shared_cache import SharedCacheUnavailable
+from app.core.memory import heavy_slot
 from app.bi.mission_kpi import MissionKpiRequest
 
 logger = logging.getLogger(__name__)
@@ -105,12 +106,39 @@ def semantic_options(body: DateRange, user: Principal = Depends(principal)):
 
 @router.post('/analytics/query', response_model=QueryResult, operation_id='queryBiAnalytics')
 def query(body: QueryRequest, user: Principal = Depends(principal)):
-    return operation(lambda: engine().execute(body, user))
+    def run():
+        with heavy_slot():
+            return engine().execute(body, user)
+    return operation(run)
 
 
 @router.post('/analytics/query/batch', operation_id='batchQueryBiAnalytics')
 def batch(body: BatchQueryRequest, user: Principal = Depends(principal)):
     return operation(lambda: engine().batch(body.queries, user))
+
+
+class RankingRequest(BiModel):
+    date_range: DateRange
+    filters: list[QueryFilter] = Field(default_factory=list, max_length=100)
+    time_from: str | None = Field(default=None, pattern=r'^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$')
+    time_to: str | None = Field(default=None, pattern=r'^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$')
+    metric: str = Field(default='efficiency', min_length=1, max_length=128)
+    min_flights: int | None = Field(default=None, ge=1, le=1000)
+
+
+@router.post('/analytics/ranking', operation_id='getCrewRanking')
+def crew_ranking(body: RankingRequest, user: Principal = Depends(principal)):
+    from app.api.analytics_pages import PageQuery
+    from app.bi.ranking import crew_ranking as rank
+    from app.core.memory import heavy_slot
+
+    def run():
+        # A reporting day (time_from/time_to) becomes a timestamp window, as on the pages.
+        window = PageQuery(date_range=body.date_range, filters=body.filters, time_from=body.time_from, time_to=body.time_to).bounded_filters()
+        request = {**body.model_dump(mode='json', by_alias=True, exclude_none=True, exclude={'time_from', 'time_to'}), 'filters': [item.model_dump(mode='json') for item in window]}
+        with heavy_slot():
+            return rank(engine(), user, request)
+    return operation(run)
 
 
 @router.post('/analytics/comparison', operation_id='compareBiAnalytics')
@@ -261,6 +289,10 @@ class DashboardQuery(BiModel):
 @router.post('/analytics/dashboards/{dashboard_id}/query', operation_id='queryBiDashboard')
 def dashboard_query(dashboard_id: str, body: DashboardQuery, user: Principal = Depends(principal)):
     def run():
+        with heavy_slot():
+            return compute()
+
+    def compute():
         definition = load_dashboard(dashboard_id, user)
         if dashboard_id in CANONICAL_PAGES:
             from app.api.analytics_pages import PageQuery

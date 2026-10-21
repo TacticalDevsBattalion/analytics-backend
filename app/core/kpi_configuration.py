@@ -7,13 +7,22 @@ import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Annotated, Iterator, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 
+_SPACES = re.compile(r"\s+")
+
+
 def normalize_kpi_text(value: object) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+    return _normalize_str(value if value.__class__ is str else str(value or ""))
+
+
+@lru_cache(maxsize=65536)
+def _normalize_str(value: str) -> str:
+    return _SPACES.sub(" ", value.strip().casefold())
 
 
 KpiText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]

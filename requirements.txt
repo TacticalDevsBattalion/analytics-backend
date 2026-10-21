@@ -6,3 +6,5 @@ PyJWT[crypto]>=2.10,<3
 tzdata>=2025.1
 redis>=5.2,<8
 shapely>=2.0,<3
+psycopg[binary]>=3.2,<4
+psycopg-pool>=3.2,<4

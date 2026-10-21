@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 import hashlib
 
 from app.api.models import FilterRequest
-from app.bi.engine import _canonical, _global_filters, default_metric_definitions
+from app.bi.engine import _canonical, _global_filters, default_metric_definitions, page_memo
 from app.bi.catalog import dimension_labels
 from app.bi.cache_policy import date_tags
 from app.bi.kpi_policy import score_missions
@@ -147,7 +147,7 @@ class SuccessCalculator:
 
 
 # Bumped when a report's payload changes, so cached reports are rebuilt.
-_BUILTIN_VERSIONS = {'map': 3, 'losses': 3, 'summary': 2, 'timeline': 2, 'average': 2, 'category': 2, 'purpose': 2}
+_BUILTIN_VERSIONS = {'map': 4, 'losses': 3, 'summary': 2, 'timeline': 2, 'average': 2, 'category': 2, 'purpose': 2}
 
 
 def builtin_result(widget, query, principal, service):
@@ -162,13 +162,18 @@ def builtin_result(widget, query, principal, service):
     edited, template = _edited_classic_keys(keys, service, definitions)
     service._check_source()
     dataset = None
+    def filtered():
+        rows = _global_filters(service._load(request, principal), [condition for condition in request['filters'] if condition['field'] != 'mission_successful'])
+        success_filters = [condition for condition in request['filters'] if condition['field'] == 'mission_successful']
+        if success_filters:
+            rows = _global_filters(service._mission_success_dataset(rows), success_filters)
+        return rows
+
     def supply():
         nonlocal dataset
         if dataset is None:
-            dataset = _global_filters(service._load(request, principal), [condition for condition in request['filters'] if condition['field'] != 'mission_successful'])
-            success_filters = [condition for condition in request['filters'] if condition['field'] == 'mission_successful']
-            if success_filters:
-                dataset = _global_filters(service._mission_success_dataset(dataset), success_filters)
+            rows_key = {name: request.get(name) for name in ('date_range', 'filters', 'data_scope', 'fixed_scope')}
+            dataset = page_memo(service, ('dataset', _canonical({**rows_key, 'principal': principal.cache_key()})), filtered)
         return dataset
     # Detailed reports can use all child sources, independent of selected card
     # keys. Safe daily link markers let warm reports avoid loading large raw
@@ -200,9 +205,12 @@ def builtin_result(widget, query, principal, service):
             scored = score_missions(dataset, principal, service, mode=mode, legacy_snapshot=snapshot, start=start, end=end)
             calculator = MissionCalculator(dataset, scored)
         elif widget.builtin in {'summary', 'timeline', 'average', 'category', 'purpose'}:
-            calculator = SuccessCalculator(dataset, service)
+            # Keyed by the dataset object, which the memo keeps alive for the page.
+            calculator = page_memo(service, ('success', id(dataset)), lambda: SuccessCalculator(dataset, service))
         if widget.builtin in {'summary', 'average', 'category', 'purpose'}:
-            values = report.overview(filters, snapshot.config, calculator=calculator)
+            summarize = lambda: report.overview(filters, snapshot.config, calculator=calculator)
+            # Only the shared success calculator outlives the widget, so only its id is a safe key.
+            values = summarize() if scored is not None else page_memo(service, ('overview', id(dataset), _canonical(filters.model_dump(mode='json')), snapshot.fingerprint), summarize)
             payload = [metric.model_dump(mode='json') for metric in values if not keys or metric.key in keys]
             for metric in payload:
                 if metric['key'] == 'weighted_efficiency' and scored is not None:

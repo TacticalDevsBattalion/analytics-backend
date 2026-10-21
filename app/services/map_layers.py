@@ -118,7 +118,8 @@ def target_features(events: Iterable[dict[str, Any]], *, affected: str, destroye
         groups.setdefault(key, []).append((row, "destroyed" if result == destroyed else "affected", point))
     features = []
     for key, records in groups.items():
-        records.sort(key=lambda item: _moment(item[0]))
+        # Ties (same minute) are ordered by content: ClickHouse returns rows in no fixed order.
+        records.sort(key=lambda item: (_moment(item[0]), item[1], _text(item[0].get("mgrs")), _text(item[0].get("flight_id"))))
         destroyed_records = [item for item in records if item[1] == "destroyed"]
         final = (destroyed_records or records)[-1]
         history = []
@@ -149,7 +150,7 @@ def target_features(events: Iterable[dict[str, Any]], *, affected: str, destroye
                 "history_truncated": len(records) > _HISTORY_LIMIT,
             },
         })
-    features.sort(key=lambda feature: feature["properties"]["timestamp"])
+    features.sort(key=lambda feature: (feature["properties"]["timestamp"], feature["properties"]["id"]))
     return {"type": "FeatureCollection", "features": features}
 
 

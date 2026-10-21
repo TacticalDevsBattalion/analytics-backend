@@ -59,10 +59,14 @@ def query_page(definition, body, user, service):
             datasets[key] = original(request, principal, comparison_context=comparison_context)
         return datasets[key]
     service._load = shared_load
+    # Widgets of one page share their filtered rows, mission success and summaries
+    # (reports.page_memo); the memo lives only while this page is computed.
+    service._page_memo = {}
     try:
         return _query_page(definition, body, user, service)
     finally:
         service._load = original
+        del service._page_memo
 
 
 def _query_page(definition, body, user, service):

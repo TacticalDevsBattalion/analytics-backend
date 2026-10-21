@@ -11,6 +11,7 @@ from app.api.configuration_routes import require_administrator
 from app.core.user_accounts import (
     SESSION_COOKIE,
     SESSION_SECONDS,
+    ChangePasswordRequest,
     CreateUserRequest,
     DashboardResponse,
     DashboardUpdate,
@@ -86,6 +87,18 @@ def keycloak_password_login(body: KeycloakLoginRequest, request: Request, respon
     account_operation(lambda: store.logout(previous))
     response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_SECONDS, httponly=True, secure=secure_session_cookie(request), samesite="strict", path="/")
     return SessionResponse(enabled=True, user=user)
+
+
+@router.post("/me/password", response_model=SessionResponse)
+def change_own_password(body: ChangePasswordRequest, request: Request, response: Response, user: SessionUser = Depends(require_signed_user)):
+    # Keycloak accounts change their password on Keycloak's page (login?action=password).
+    if keycloak.enabled():
+        raise HTTPException(409, "Change the password in Keycloak")
+    check_request_origin(request)
+    client = request.client.host if request.client is not None else "unknown"
+    token, current = account_operation(lambda: get_user_account_store().change_password(user.id, body.current_password.get_secret_value(), body.new_password.get_secret_value(), client))
+    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_SECONDS, httponly=True, secure=secure_session_cookie(request), samesite="strict", path="/")
+    return SessionResponse(enabled=True, user=current)
 
 
 @router.post("/auth/logout", response_model=SessionResponse)

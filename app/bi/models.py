@@ -204,6 +204,12 @@ class UserAccessDefinition(VersionedEntity):
     denied_permissions: list[str] = Field(default_factory=list, max_length=500)
     data_scope: DataScope = Field(default_factory=DataScope)
     comparison_precision: Precision = "ROUND_5"
+    # Simplified access (app/bi/access_profiles.py); when set it replaces the
+    # role, permission and scope fields above.
+    profile: Literal["company", "battalion", "command", "admin"] | None = None
+    battalion_id: str | None = Field(default=None, max_length=64)
+    company_id: str | None = Field(default=None, max_length=64)
+    coordinates: bool = False
 
     @field_validator("data_scope", mode="before")
     @classmethod

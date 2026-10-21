@@ -93,6 +93,7 @@ def run_once(settings: PrewarmSettings | None = None, *, should_stop=lambda: Fal
     from app.api.analytics_pages import PageQuery
     from app.api.bi_routes import engine
     from app.bi.page_cache import page_json
+    from app.core import memory
     settings = settings or PrewarmSettings.from_env()
     deadline = time.monotonic() + settings.max_seconds
     service = engine()
@@ -103,6 +104,10 @@ def run_once(settings: PrewarmSettings | None = None, *, should_stop=lambda: Fal
         body = PageQuery.model_validate(period)
         for user, pages in users:
             for definition in pages:
+                # Never push the container toward its memory limit for a pass that can wait.
+                if memory.under_pressure():
+                    logger.info('analytics_prewarm_paused_memory pages=%s', done)
+                    return {'pages': done, 'failed': failed, 'complete': False}
                 if should_stop() or time.monotonic() >= deadline:
                     logger.info('analytics_prewarm_stopped pages=%s failed=%s seconds=%.1f', done, failed, time.monotonic() - started)
                     return {'pages': done, 'failed': failed, 'complete': False}

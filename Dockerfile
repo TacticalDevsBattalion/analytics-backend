@@ -2,9 +2,12 @@
 # Поза мережею k2: --build-arg REGISTRY=docker.io/library
 ARG REGISTRY=10.20.50.25:8081
 FROM ${REGISTRY}/python:3.13-slim AS base
+# MALLOC_ARENA_MAX: glibc gives request threads their own memory arenas that are never
+# shrunk; two arenas keep resident memory close to what the backend really uses.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    MALLOC_ARENA_MAX=2 \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 WORKDIR /app
 COPY certs/ /tmp/app-certificates/

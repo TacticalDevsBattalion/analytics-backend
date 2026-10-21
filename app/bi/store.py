@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.core import database
 from app.bi.models import (
     ENTITY_MODELS, CategoryWeight, DashboardAssignment, DashboardDefinition,
     DataScope, KpiDefinition, MetricDefinition, QueryRequest, RoleDefinition,
@@ -45,13 +46,13 @@ class BiStore:
         with self._lock:
             if self._initialized:
                 return
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
-            connection.row_factory = sqlite3.Row
+            connection = database.connect(self.path, "bi")
             try:
-                connection.execute("PRAGMA foreign_keys=ON")
-                connection.execute("CREATE TABLE IF NOT EXISTS bi_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-                migrations = sorted((Path(__file__).parent / "migrations").glob("*.sql"))
+                # PostgreSQL gets the whole schema from app/migrations/postgres;
+                # a new BI migration needs a matching PostgreSQL migration there.
+                migrations = [] if database.is_postgres(connection) else sorted((Path(__file__).parent / "migrations").glob("*.sql"))
+                if migrations:
+                    connection.execute("CREATE TABLE IF NOT EXISTS bi_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
                 for migration in migrations:
                     version = int(migration.name.split("_", 1)[0])
                     # The checked-in SQL owns every schema change, including new installations.
@@ -81,12 +82,23 @@ class BiStore:
     def _now():
         return datetime.now(timezone.utc).isoformat()
 
+    def _reads(self) -> database.ReadCache:
+        return database.read_cache(database.location(self.path) + ":bi")
+
+    def _cached(self, key, load):
+        """Decoded definitions are reused while the configuration revision is unchanged."""
+        cache = self._reads()
+        revision = cache.current(self._stored_revision)
+        hit, value = cache.get(key, revision)
+        if not hit:
+            value = load()
+            cache.put(key, revision, value)
+        return [item.model_copy(deep=True) for item in value] if isinstance(value, list) else value.model_copy(deep=True) if value is not None else None
+
     @contextmanager
     def _connection(self):
         self._initialize()
-        connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
+        connection = database.TrackedConnection(database.connect(self.path, "bi"))
         try:
             yield connection
             if connection.in_transaction:
@@ -97,6 +109,8 @@ class BiStore:
             raise
         finally:
             connection.close()
+            if connection.wrote:
+                self._reads().invalidate()
 
     @classmethod
     def _table(cls, entity):
@@ -113,27 +127,37 @@ class BiStore:
 
     def list(self, entity: str):
         table = self._table(entity)
-        with self._connection() as connection:
-            return [self._decode(entity, row, connection) for row in connection.execute(f"SELECT * FROM {table} ORDER BY created_at,id")]
+
+        def load():
+            with self._connection() as connection:
+                return [self._decode(entity, row, connection) for row in connection.execute(f"SELECT * FROM {table} ORDER BY created_at,id")]
+        return self._cached(("list", entity), load)
 
     def get(self, entity: str, entity_id: str):
         table = self._table(entity)
-        with self._connection() as connection:
-            row = connection.execute(f"SELECT * FROM {table} WHERE id=?", (entity_id,)).fetchone()
-            if row is None:
-                raise BiNotFound("BI definition was not found")
-            return self._decode(entity, row, connection)
+
+        def load():
+            with self._connection() as connection:
+                row = connection.execute(f"SELECT * FROM {table} WHERE id=?", (entity_id,)).fetchone()
+                return self._decode(entity, row, connection) if row is not None else None
+        value = self._cached(("get", entity, entity_id), load)
+        if value is None:
+            raise BiNotFound("BI definition was not found")
+        return value
 
     def find_by_key(self, entity: str, key: str, *, weight_set_id: str = "target_equivalent"):
         column = {"metrics": "metric_key", "kpis": "metric_key", "roles": "role_key", "user_access": "user_id", "dashboards": "slug", "category_weights": "category", "weight_sets": "weight_set_key"}.get(entity)
         if column is None:
             raise ValueError("This entity does not have a lookup key")
         table = self._table(entity)
-        with self._connection() as connection:
-            predicate = f"{column}=?" + (" AND weight_set_id=?" if entity == "category_weights" else "")
-            values = (key, weight_set_id) if entity == "category_weights" else (key,)
-            row = connection.execute(f"SELECT * FROM {table} WHERE {predicate}", values).fetchone()
-            return self._decode(entity, row, connection) if row else None
+
+        def load():
+            with self._connection() as connection:
+                predicate = f"{column}=?" + (" AND weight_set_id=?" if entity == "category_weights" else "")
+                values = (key, weight_set_id) if entity == "category_weights" else (key,)
+                row = connection.execute(f"SELECT * FROM {table} WHERE {predicate}", values).fetchone()
+                return self._decode(entity, row, connection) if row else None
+        return self._cached(("key", entity, key, weight_set_id), load)
 
     def _save_record(self, connection, entity, definition, expected_revision):
         table = self._table(entity)
@@ -240,9 +264,12 @@ class BiStore:
             connection.execute(f"DELETE FROM {table} WHERE id=?", (entity_id,))
             connection.execute("UPDATE bi_state SET configuration_revision=configuration_revision+1 WHERE id=1")
 
-    def configuration_revision(self) -> int:
+    def _stored_revision(self) -> int:
         with self._connection() as connection:
             return connection.execute("SELECT configuration_revision FROM bi_state WHERE id=1").fetchone()[0]
+
+    def configuration_revision(self) -> int:
+        return self._reads().current(self._stored_revision)
 
     @staticmethod
     def _expire_cache_jobs(connection, now: float) -> int:

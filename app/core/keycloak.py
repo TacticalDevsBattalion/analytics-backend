@@ -58,6 +58,9 @@ def configuration() -> dict[str, str]:
 
 
 def _migrate(connection) -> None:
+    from app.core import database
+    if database.is_postgres(connection):
+        return  # Part of the PostgreSQL schema.
     connection.execute("CREATE TABLE IF NOT EXISTS account_schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
     if connection.execute("SELECT 1 FROM account_schema_migrations WHERE version='001_keycloak'").fetchone():
         return
@@ -68,8 +71,16 @@ def _migrate(connection) -> None:
     connection.execute("INSERT INTO account_schema_migrations VALUES (?,?)", ("001_keycloak", datetime.now(timezone.utc).isoformat()))
 
 
-def begin_login() -> tuple[str, str]:
+# Keycloak actions a signed-in user may start from the application.
+ACTIONS = {"password": "UPDATE_PASSWORD"}
+
+
+def begin_login(action: str | None = None, login_hint: str | None = None) -> tuple[str, str]:
+    """Keycloak's own page also handles what the password form cannot: a temporary
+    password, OTP setup, and with an action a voluntary password change."""
     config = configuration()
+    if action is not None and action not in ACTIONS:
+        raise HTTPException(400, "Unknown Keycloak action")
     state, browser, verifier, nonce = (secrets.token_urlsafe(32) for _ in range(4))
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     with get_user_account_store()._connection() as connection:
@@ -80,6 +91,10 @@ def begin_login() -> tuple[str, str]:
     parameters = {"client_id": config["client_id"], "redirect_uri": config["redirect_uri"],
                   "response_type": "code", "scope": "openid profile email", "state": state,
                   "nonce": nonce, "code_challenge": challenge, "code_challenge_method": "S256"}
+    if action:
+        parameters["kc_action"] = ACTIONS[action]
+    if login_hint and len(login_hint) <= 255 and login_hint.isprintable():
+        parameters["login_hint"] = login_hint
     return config["issuer"] + "/protocol/openid-connect/auth?" + urlencode(parameters), browser
 
 
@@ -94,8 +109,12 @@ def logout_url() -> str | None:
 
 
 def frontend_with_error(reason: str) -> str:
+    return frontend_with({"auth_error": reason})
+
+
+def frontend_with(parameters: dict[str, str]) -> str:
     frontend = configuration()["frontend"]
-    return frontend + ("&" if urlsplit(frontend).query else "?") + urlencode({"auth_error": reason})
+    return frontend + ("&" if urlsplit(frontend).query else "?") + urlencode(parameters)
 
 
 def consume_state(state: str, browser: str | None) -> tuple[str, str]:

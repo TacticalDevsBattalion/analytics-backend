@@ -16,6 +16,7 @@ from typing import Annotated, Callable, Iterator, Literal
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException, Request
+from app.core import database
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, ValidationError, field_validator
 
 from app.core.config import get_settings
@@ -150,6 +151,13 @@ class UpdateUserRequest(AccountModel):
         return validate_password(value) if value is not None else None
 
 
+class ChangePasswordRequest(AccountModel):
+    current_password: SecretStr = Field(min_length=1, max_length=128)
+    new_password: SecretStr
+
+    _validate_password = field_validator("new_password")(validate_password)
+
+
 class AccountConflict(ValueError):
     pass
 
@@ -208,9 +216,13 @@ class UserAccountStore:
         with self._initialization_lock:
             if self._initialized:
                 return
-            self.path.parent.mkdir(parents=True, exist_ok=True)
             with self._connection(initialize=False) as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                if database.is_postgres(connection):
+                    # The PostgreSQL schema is created by app/migrations/postgres.
+                    connection.execute("UPDATE account_state SET ever_enabled=1 WHERE EXISTS (SELECT 1 FROM users)")
+                    self._initialized = True
+                    return
                 connection.execute("CREATE TABLE IF NOT EXISTS account_state (id INTEGER PRIMARY KEY CHECK(id=1), ever_enabled INTEGER NOT NULL CHECK(ever_enabled IN (0,1)))")
                 connection.execute("INSERT OR IGNORE INTO account_state VALUES (1,0)")
                 connection.execute("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL, username_key TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('administrator','viewer')), active INTEGER NOT NULL CHECK(active IN (0,1)), created_at TEXT NOT NULL, password_hash TEXT NOT NULL, auth_version INTEGER NOT NULL DEFAULT 0)")
@@ -225,10 +237,8 @@ class UserAccountStore:
     def _connection(self, initialize=True) -> Iterator[sqlite3.Connection]:
         if initialize:
             self._initialize()
-        connection = sqlite3.connect(self.path, timeout=10, isolation_level=None)
-        connection.row_factory = sqlite3.Row
+        connection = database.connect(self.path, "users")
         try:
-            connection.execute("PRAGMA foreign_keys=ON")
             yield connection
             if connection.in_transaction:
                 connection.commit()
@@ -309,7 +319,7 @@ class UserAccountStore:
                 if row is not None and row["attempts"] >= limit:
                     raise LoginRateLimited("Sign-in is temporarily unavailable; try again later")
             for scope, _ in scopes:
-                connection.execute("INSERT INTO login_attempts VALUES (?,?,1) ON CONFLICT(scope) DO UPDATE SET attempts=attempts+1", (scope, now))
+                connection.execute("INSERT INTO login_attempts VALUES (?,?,1) ON CONFLICT(scope) DO UPDATE SET attempts=login_attempts.attempts+1", (scope, now))
 
     def clear_login_attempts(self, username: str) -> None:
         with self._connection() as connection:
@@ -333,6 +343,35 @@ class UserAccountStore:
             connection.execute("DELETE FROM sessions WHERE expires_at<=?", (now,))
             connection.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", (token_digest(token), current["id"], current["auth_version"], now, now + SESSION_SECONDS))
             connection.execute("DELETE FROM login_attempts WHERE scope=?", (token_digest("account:" + normalize_username(username)),))
+            return token, SessionUser(id=current["id"], username=current["username"], display_name=current["display_name"], role=current["role"])
+
+    def change_password(self, user_id: str, current_password: str, new_password: str, client: str) -> tuple[str, SessionUser]:
+        """The user's own change: checks the current password, ends every other session
+        and returns a new one for this browser."""
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if row is None:
+            raise AuthenticationFailed("Current password is incorrect")
+        # Guessing the current password counts like sign-in attempts.
+        self._reserve_login_attempt(row["username"], client)
+        # A conflict, not 401: a wrong current password must not look like a lost session.
+        if not verify_password(current_password, row["password_hash"]):
+            raise AccountConflict("Current password is incorrect")
+        if verify_password(new_password, row["password_hash"]):
+            raise AccountConflict("The new password must differ from the current one")
+        hashed = password_hash(new_password)
+        token = secrets.token_urlsafe(32)
+        now = self.clock()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if current is None or not current["active"] or current["password_hash"] != row["password_hash"]:
+                raise AuthenticationFailed("Current password is incorrect")
+            version = current["auth_version"] + 1
+            connection.execute("UPDATE users SET password_hash=?,auth_version=? WHERE id=?", (hashed, version, user_id))
+            connection.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            connection.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", (token_digest(token), user_id, version, now, now + SESSION_SECONDS))
+            connection.execute("DELETE FROM login_attempts WHERE scope=?", (token_digest("account:" + normalize_username(current["username"])),))
             return token, SessionUser(id=current["id"], username=current["username"], display_name=current["display_name"], role=current["role"])
 
     def session_user(self, token: str | None) -> SessionUser | None:

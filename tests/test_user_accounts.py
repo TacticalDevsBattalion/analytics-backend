@@ -11,6 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from app.core import database
 from app.core.app_configuration import ApplicationConfigurationStore, default_application_configuration
 from app.core.kpi_configuration import KpiConfiguration
 from app.core.user_accounts import (
@@ -89,8 +90,14 @@ class AccountStoreTests(StoreFixture, unittest.TestCase):
         self.assertEqual(len(session["token_digest"]), 64)
         self.assertEqual(user.id, admin.id)
         self.assertNotEqual(user.id, viewer.id)
-        self.assertNotIn(token.encode(), self.path.read_bytes())
-        self.assertNotIn(TEST_PASSWORD.encode(), self.path.read_bytes())
+        if database.postgres_enabled():
+            with self.store._connection() as connection:
+                stored = " ".join(str(value) for table in ("users", "sessions", "login_attempts") for row in connection.execute(f"SELECT * FROM {table}") for value in row)
+            self.assertNotIn(token, stored)
+            self.assertNotIn(TEST_PASSWORD, stored)
+        else:
+            self.assertNotIn(token.encode(), self.path.read_bytes())
+            self.assertNotIn(TEST_PASSWORD.encode(), self.path.read_bytes())
 
     def test_expiry_logout_and_token_rotation_do_not_reuse_session_secrets(self):
         self.create()
@@ -123,6 +130,21 @@ class AccountStoreTests(StoreFixture, unittest.TestCase):
         self.assertTrue(self.store.enabled())
         with self.assertRaises(AuthenticationFailed):
             self.store.login("viewer", "a-new-private-password", "client")
+
+    def test_own_password_change_checks_current_password_and_keeps_only_new_session(self):
+        admin = self.create()
+        old_token, _ = self.store.login("admin", TEST_PASSWORD, "client")
+        with self.assertRaises(AccountConflict):
+            self.store.change_password(admin.id, "wrong-password-123", "another-password-42", "client")
+        with self.assertRaises(AccountConflict):
+            self.store.change_password(admin.id, TEST_PASSWORD, TEST_PASSWORD, "client")
+        token, user = self.store.change_password(admin.id, TEST_PASSWORD, "another-password-42", "client")
+        self.assertEqual(user.id, admin.id)
+        self.assertIsNone(self.store.session_user(old_token))
+        self.assertEqual(self.store.session_user(token).id, admin.id)
+        with self.assertRaises(AuthenticationFailed):
+            self.store.login("admin", TEST_PASSWORD, "client")
+        self.store.login("admin", "another-password-42", "client")
 
     def test_last_active_administrator_cannot_be_disabled_or_demoted(self):
         admin = self.create()
@@ -249,7 +271,7 @@ class AccountApiTests(unittest.TestCase):
 
     def test_bootstrap_does_not_reopen_or_require_anonymous_analytics_login(self):
         before = self.client.get("/api/auth/session")
-        self.assertEqual(before.json(), {"enabled": False, "user": None})
+        self.assertEqual(before.json(), {"enabled": False, "user": None, "logout_url": None})
         self.assertEqual(before.headers["cache-control"], "no-store")
         self.assertEqual(self.client.get("/api/health").status_code, 200)
         unauthorized = self.client.post("/api/admin/users", json={"username": "admin", "display_name": "Name", "password": TEST_PASSWORD, "role": "administrator"})
@@ -258,7 +280,7 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(invalid_first.status_code, 409)
         self.assertFalse(self.store.enabled())
         self.create()
-        self.assertEqual(self.client.get("/api/auth/session").json(), {"enabled": True, "user": None})
+        self.assertEqual(self.client.get("/api/auth/session").json(), {"enabled": True, "user": None, "logout_url": None})
         self.assertEqual(self.client.get("/api/health").status_code, 200)
 
     def test_all_analytics_options_source_and_cache_reads_require_sign_in(self):
@@ -310,7 +332,7 @@ class AccountApiTests(unittest.TestCase):
         token = self.client.cookies.get(SESSION_COOKIE)
         self.assertEqual(self.client.get("/api/auth/session").json()["user"]["id"], admin["id"])
         logout = self.client.post("/api/auth/logout")
-        self.assertEqual(logout.json(), {"enabled": True, "user": None})
+        self.assertEqual(logout.json(), {"enabled": True, "user": None, "logout_url": None})
         self.assertIsNone(self.store.session_user(token))
         self.assertEqual(self.client.get("/api/me/dashboard").status_code, 401)
 

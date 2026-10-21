@@ -3,6 +3,8 @@ import os
 import sqlite3
 import tempfile
 import unittest
+
+from app.core import database
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -182,10 +184,12 @@ class PurposeKpiStoreTests(unittest.TestCase):
         seed = self.store.snapshot().config.model_dump()
         seed.pop("kpi")
         import json
-        with closing(sqlite3.connect(self.path)) as connection:
+        with closing(database.connect(self.path, 'configuration')) as connection:
             connection.execute("UPDATE configuration_versions SET config_json=?", (json.dumps(seed),))
             connection.execute("INSERT INTO configuration_draft VALUES(1,?,1)", (json.dumps(seed),))
             connection.commit()
+        # Rows written outside the store, as by an older version before this process started.
+        self.store._reads().invalidate()
         snapshot = self.store.snapshot()
         self.assertEqual(snapshot.config.kpi.purpose_rules, [])
         self.assertEqual(snapshot.draft.kpi.purpose_rules, [])

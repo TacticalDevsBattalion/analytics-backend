@@ -68,7 +68,9 @@ def sync(force: bool = False) -> None:
         if not force and now - _checked_at < _TTL_SECONDS:
             return
         try:
-            mapping = _existing(_configured_fields())
+            fields = _configured_fields()
+            # Nothing to look up without configured extra fields: skip the schema read.
+            mapping = _existing(fields) if fields else {}
         except Exception:
             # Keep the last known registry when storage or ClickHouse is unavailable.
             _checked_at = now

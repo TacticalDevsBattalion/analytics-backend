@@ -12,6 +12,7 @@ from app.bi.store import get_bi_store
 from app.bi.page_cache import cached_page_response
 from app.bi.widgets import query_page, validate_widget
 from app.core.user_accounts import check_request_origin
+from app.core.memory import heavy_slot
 
 router = APIRouter(prefix='/v1/analytics', dependencies=[Depends(no_store)])
 Page = Literal['dashboard', 'statistics']
@@ -49,7 +50,8 @@ def preview_widget(body: WidgetPreview, user=Depends(principal)):
             raise PermissionError('The widget is unavailable')
         validate_widget(widget, user, engine())
         definition = DashboardDefinition(id='preview', name='Preview', slug='preview', widgets=[widget])
-        result = query_page(definition, body, user, engine())['results'][0]
+        with heavy_slot():
+            result = query_page(definition, body, user, engine())['results'][0]
         if result['status'] == 'error':
             raise ValueError(result['error'])
         return result['data']

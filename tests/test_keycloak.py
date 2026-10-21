@@ -77,6 +77,26 @@ class KeycloakTests(KeycloakFixture):
         with self.assertRaises(HTTPException):
             keycloak.consume_state(query["state"][0], browser)
 
+    def test_password_change_and_setup_go_through_keycloak_page(self):
+        url, browser = keycloak.begin_login("password", "person@example")
+        query = parse_qs(urlsplit(url).query)
+        self.assertEqual(query["kc_action"], ["UPDATE_PASSWORD"])
+        self.assertEqual(query["login_hint"], ["person@example"])
+        plain = parse_qs(urlsplit(keycloak.begin_login(None, "bad\nhint")[0]).query)
+        self.assertNotIn("kc_action", plain)
+        self.assertNotIn("login_hint", plain)
+        with self.assertRaises(HTTPException):
+            keycloak.begin_login("delete_account")
+        app = FastAPI()
+        app.include_router(router, prefix="/api")
+        with TestClient(app, base_url="https://analytics.example") as client:
+            started = client.get("/api/auth/keycloak/login", params={"action": "password"}, follow_redirects=False)
+            query = parse_qs(urlsplit(started.headers["location"]).query)
+            self.http.post.return_value.json.return_value = {"id_token": self.signed(nonce=query["nonce"][0])}
+            callback = client.get("/api/auth/keycloak/callback", params={"code": "code", "state": query["state"][0], "kc_action_status": "success"}, follow_redirects=False)
+            self.assertEqual(callback.headers["location"], self.config["frontend"] + "?auth_notice=password_updated")
+            self.assertIsNotNone(self.store.session_user(client.cookies.get(SESSION_COOKIE)))
+
     def test_wrong_browser_expiry_and_replayed_state_cannot_create_sessions(self):
         _, query, browser = self.begin()
         with self.assertRaises(HTTPException):

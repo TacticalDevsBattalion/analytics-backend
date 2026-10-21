@@ -3,6 +3,8 @@ import json
 import sqlite3
 import tempfile
 import unittest
+
+from app.core import database
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import replace
@@ -176,6 +178,7 @@ class SemanticMetricTests(unittest.TestCase):
 
 
 class LegacyWeightMigrationTests(unittest.TestCase):
+    @unittest.skipIf(database.postgres_enabled(), "builds an old SQLite file to test its upgrade")
     def test_migration_preserves_old_weight_ids_json_and_revisions(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

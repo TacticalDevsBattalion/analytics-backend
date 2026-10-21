@@ -28,6 +28,8 @@
 #              CLICKHOUSE_VERIFY_SSL, KEYCLOAK_ENABLED ("true"), KEYCLOAK_ISSUER
 #              (https://auth.infrastructure.kub.k2.lan/realms/k2), KEYCLOAK_CLIENT_ID, KEYCLOAK_ADMIN_ROLE
 #   Secret:    CLICKHOUSE_PASSWORD, KEYCLOAK_CLIENT_SECRET,
+#              DATABASE_URL (postgresql://user:password@host:port/db — користувачі, доступи, дашборди
+#              і налаштування в PostgreSQL; без нього — SQLite-файли з PVC, як раніше),
 #              APP_ADMIN_TOKEN (лише без Keycloak — створення першого адміна),
 #              CACHE_ADMIN_TOKEN (необов'язково — вмикає POST /api/cache/clear)
 #   kubectl -n ${NAMESPACE} patch secret ${SERVICE_NAME}-secret -p '{"stringData":{"CLICKHOUSE_PASSWORD":"…"}}'
@@ -161,6 +163,19 @@ spec:
               value: "analytics"
             - name: CACHE_MAX_VALUE_BYTES
               value: "4194304"
+            # Схема PostgreSQL (коли в Secret є DATABASE_URL) і розмір пулу з'єднань.
+            - name: DATABASE_SCHEMA
+              value: "app"
+            - name: DATABASE_POOL_SIZE
+              value: "8"
+            # Пам'ять: не більше двох важких розрахунків одночасно; при 70% ліміту (2 ГБ нижче)
+            # фоновий прогрів кешу стає на паузу, а пам'ять повертається системі.
+            - name: MEMORY_LIMIT_MB
+              value: "2048"
+            - name: HEAVY_COMPUTE_CONCURRENCY
+              value: "2"
+            - name: MEMORY_PRESSURE_PERCENT
+              value: "70"
           startupProbe:
             httpGet:
               path: /health

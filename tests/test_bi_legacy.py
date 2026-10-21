@@ -210,7 +210,8 @@ class LegacyScopeTests(unittest.TestCase):
             granted = replace(viewer, permissions=viewer.permissions | {'comparison.department', 'comparison.group', 'comparison.team'})
             permitted = hierarchy_options(granted)
             self.assertEqual({row['id'] for row in permitted['departments']}, {'1', '2'})
-            self.assertEqual({row['id'] for row in permitted['groups']}, {'11', '12'})
+            # Companies are compared across the brigade, so other battalions' companies are peers too.
+            self.assertEqual({row['id'] for row in permitted['groups']}, {'11', '12', '21'})
             self.assertEqual({row['id'] for row in permitted['teams']}, {'own-team', 'peer-team'})
             missing_view = replace(granted, permissions=granted.permissions - {'comparison.view'})
             self.assertEqual(hierarchy_options(missing_view), own)

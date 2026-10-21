@@ -16,6 +16,7 @@ from pydantic import Field, StringConstraints, model_validator
 from app.bi.engine import QueryEngine, QueryError
 from app.bi.models import BiModel, DateRange, QueryRequest
 from app.bi.store import BiConflict, get_bi_store
+from app.core import memory
 from app.core.cache import cache
 from app.core.config import get_backend_config, get_settings
 
@@ -155,7 +156,13 @@ def start_warming(body: CacheWarmRequest, principal) -> dict:
                 if stopped.is_set() or time.monotonic() >= deadline:
                     store.update_cache_job(job['id'], 'failed', completed, 'timeout', lease_owner=owner)
                     return
-                service.execute(query, principal)
+                # Background work yields to users while the container is short of memory.
+                waited = 0
+                while memory.under_pressure() and waited < 60 and not stopped.is_set():
+                    stopped.wait(2)
+                    waited += 2
+                with memory.heavy_slot():
+                    service.execute(query, principal)
                 completed += 1
                 gc.collect()  # Free the part's rows before the next one is loaded.
                 store.update_cache_job(job['id'], 'running', completed, lease_owner=owner)

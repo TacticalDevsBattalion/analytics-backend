@@ -3,6 +3,8 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+
+from app.core import database
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
@@ -201,6 +203,7 @@ class ConfigurationStoreTests(ConfigurationFixture, unittest.TestCase):
         self.assertIn(snapshot.draft.appearance.title, ("Draft A", "Draft B"))
         self.assertEqual(len(snapshot.history), 1)
 
+    @unittest.skipIf(database.postgres_enabled(), "builds an old SQLite file to test its upgrade")
     def test_existing_database_migrates_draft_generation_and_preserves_versions(self):
         self.path.parent.mkdir(parents=True)
         with closing(sqlite3.connect(self.path)) as connection:

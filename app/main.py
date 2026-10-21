@@ -12,6 +12,8 @@ from app.api.configuration_routes import router as configuration_router
 from app.api.account_routes import router as account_router
 from app.api.keycloak_routes import router as keycloak_router
 from app.api.bi_routes import router as bi_router
+from app.api.access_routes import router as access_router
+from app.api.preferences_routes import router as preferences_router
 from app.api.kpi_policy_routes import router as kpi_policy_router
 from app.api.analytics_pages import router as analytics_pages_router
 from app.api.personal_dashboard import router as personal_dashboard_router
@@ -49,6 +51,8 @@ app.include_router(configuration_router, prefix=api_config.router_prefix)
 app.include_router(account_router, prefix=api_config.router_prefix)
 app.include_router(keycloak_router, prefix=api_config.router_prefix)
 app.include_router(bi_router, prefix=api_config.router_prefix)
+app.include_router(access_router, prefix=api_config.router_prefix)
+app.include_router(preferences_router, prefix=api_config.router_prefix)
 app.include_router(kpi_policy_router, prefix=api_config.router_prefix)
 app.include_router(analytics_pages_router, prefix=api_config.router_prefix)
 app.include_router(personal_dashboard_router, prefix=api_config.router_prefix)
@@ -96,4 +100,12 @@ def warm_runtime_cache() -> None:
             start_warming(CacheWarmRequest(), Principal(None, 'administrator', frozenset({'*'}), DataScope(scope_type='ALL'), 'EXACT'))
         except Exception:
             logger.warning('Backend aggregate cache warmup could not be scheduled')
+
+
+@app.on_event("shutdown")
+def close_store_connections() -> None:
+    from app.bi import prewarm
+    from app.core import database
+    prewarm.stop()
+    database.close_pools()
 

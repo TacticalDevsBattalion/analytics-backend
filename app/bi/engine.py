@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
-from functools import cmp_to_key
+from functools import cmp_to_key, lru_cache
 from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
@@ -196,10 +196,28 @@ def _date(value: Any) -> date | None:
         return value
     if value is None:
         return None
+    # Row dates repeat (one per day), so each distinct value is parsed once.
+    return _parse_day(value[:10] if value.__class__ is str else str(value)[:10])
+
+
+@lru_cache(maxsize=8192)
+def _parse_day(value: str) -> date | None:
     try:
-        return date.fromisoformat(str(value)[:10])
+        return date.fromisoformat(value)
     except ValueError:
         return None
+
+
+def page_memo(service: Any, key: Any, factory: Callable[[], Any]) -> Any:
+    """One result per key while a page is computed (widgets.query_page); computed
+    directly elsewhere. A page's widgets otherwise filter the same rows, resolve the
+    same mission success and build the same summaries each."""
+    memo = getattr(service, "_page_memo", None)
+    if memo is None:
+        return factory()
+    if key not in memo:
+        memo[key] = factory()
+    return memo[key]
 
 
 def _numeric(value: Any) -> float | None:
@@ -363,10 +381,26 @@ def _pack_partition(value: dict[str, list[dict[str, Any]]]) -> Any:
     return {"zjson": base64.b64encode(zlib.compress(raw, 6)).decode("ascii")}
 
 
-def _unpack_partition(value: Any) -> dict[str, list[dict[str, Any]]]:
+def _unpack_partition(value: Any, memo: dict[str, str] | None = None) -> dict[str, list[dict[str, Any]]]:
     if isinstance(value, dict) and set(value) == {"zjson"}:
-        return json.loads(zlib.decompress(base64.b64decode(value["zjson"])).decode("utf-8"))
+        return _share_strings(json.loads(zlib.decompress(base64.b64decode(value["zjson"])).decode("utf-8")), memo)
     return value
+
+
+def _share_strings(dataset: dict[str, list[dict[str, Any]]], memo: dict[str, str] | None) -> dict[str, list[dict[str, Any]]]:
+    """Make equal text values one object across a period's rows.
+
+    Departments, positions, devices and purposes repeat on every row: a month held
+    ~3.4 million strings of which 6% were distinct, ~200 MB of duplicates.
+    """
+    if memo is None:
+        return dataset
+    for rows in dataset.values():
+        for row in rows:
+            for key, item in row.items():
+                if item.__class__ is str:
+                    row[key] = memo.setdefault(item, item)
+    return dataset
 
 
 def _parallel(worker: Callable[[Any], Any], tasks: list[Any]) -> list[Any]:
@@ -699,9 +733,10 @@ class QueryEngine:
         base = self._period_base()
         partitions: dict[date, dict[str, list[dict[str, Any]]]] = {}
         missing = []
+        memo: dict[str, str] = {}  # One object per distinct text value of the period.
         for day in days(start, end):
             if self.cache_policy.ttl_for_day(day, current):
-                hit, value = self._probe_partition(base, day)
+                hit, value = self._probe_partition(base, day, memo)
                 if hit:
                     partitions[day] = value
                     continue
@@ -713,7 +748,7 @@ class QueryEngine:
             for day in missing:
                 hit = False
                 if self.cache_policy.ttl_for_day(day, current):
-                    hit, value = self._probe_partition(base, day)
+                    hit, value = self._probe_partition(base, day, memo)
                     if hit:
                         partitions[day] = value
                 if not hit:
@@ -732,7 +767,7 @@ class QueryEngine:
                 # the read proves no parent day changed while it was in flight.
                 epoch_before = cache.generations(["data:epoch"]).get("data:epoch", 0)
                 started = time.perf_counter()
-                normalized = _enrich(self.row_loader(interval[0], interval[-1]))
+                normalized = _share_strings(_enrich(self.row_loader(interval[0], interval[-1])), memo)
                 logger.info("bi_source_read days=%s db_ms=%.2f", len(interval), (time.perf_counter() - started) * 1000)
                 # A child without a known parent may still get one when late flight
                 # data arrives, so such days are cached only once they leave the hot band.
@@ -777,7 +812,7 @@ class QueryEngine:
             return {source: [row for row in rows if matches_filters(row, comparison_context)] for source, rows in dataset.items()}
         return self._apply_scope(dataset, principal, request) if principal is not None else dataset
 
-    def _probe_partition(self, base: dict[str, Any], day: date) -> tuple[bool, Any]:
+    def _probe_partition(self, base: dict[str, Any], day: date, memo: dict[str, str] | None = None) -> tuple[bool, Any]:
         key = _canonical({**base, "day": day.isoformat()})
         own_tags = [f"data:{day}", "dictionary"]
         hit, links = cache.probe("bi.period.links", key, dependency_tags=own_tags)
@@ -785,7 +820,7 @@ class QueryEngine:
             return False, None
         parent_tags = [f"data:{parent}" for parent in links["parent_dates"] if parent != day.isoformat()]
         hit, value = cache.probe("bi.period", key, dependency_tags=own_tags + parent_tags)
-        return (True, _unpack_partition(value)) if hit else (False, None)
+        return (True, _unpack_partition(value, memo)) if hit else (False, None)
 
     def _period_base(self):
         # Shared by every user: rows are stored unscoped and filtered per request.
@@ -809,16 +844,22 @@ class QueryEngine:
         return scoped
 
     def _evaluate(self, request: dict[str, Any], principal: Any, definitions: dict[str, dict[str, Any]], weights: list[dict[str, Any]], dataset: dict[str, list[dict[str, Any]]], *, apply_scope: bool = True) -> dict[str, Any]:
-        if apply_scope:
-            dataset = self._apply_scope(dataset, principal, request)
-        start, end = (_date(request["date_range"][key]) for key in ("from", "to"))
-        dataset = {source: [row for row in rows if not (source == "flights" and row.get("_bi_parent_context")) and (day := _date(row.get("date"))) is not None and start <= day <= end] for source, rows in dataset.items()}
-        dataset = _global_filters(dataset, [condition for condition in request["filters"] if condition["field"] not in MISSION_FIELDS])
+        def population():
+            rows_by_source = self._apply_scope(dataset, principal, request) if apply_scope else dataset
+            start, end = (_date(request["date_range"][key]) for key in ("from", "to"))
+            rows_by_source = {source: [row for row in rows if not (source == "flights" and row.get("_bi_parent_context")) and (day := _date(row.get("date"))) is not None and start <= day <= end] for source, rows in rows_by_source.items()}
+            return _global_filters(rows_by_source, [condition for condition in request["filters"] if condition["field"] not in MISSION_FIELDS])
+
+        # The page memo keeps `dataset` alive, so its id is a stable key while the page is computed.
+        scope = _canonical({"principal": principal.cache_key() if apply_scope and principal is not None else None, **{name: request.get(name) for name in ("date_range", "filters", "data_scope", "fixed_scope")}})
+        base = page_memo(self, ("evaluate", id(dataset), apply_scope, scope), population)
+        page_memo(self, ("evaluate-source", id(dataset)), lambda: dataset)
+        dataset = base
         dimensions = request.get("dimensions", [])
         keys = [item["key"] for item in request["metrics"]]
         dependencies = self._dependencies(keys, definitions)
         if _uses_mission_fields(request, dependencies):
-            dataset = self._mission_success_dataset(dataset)
+            dataset = page_memo(self, ("mission", id(base)), lambda: self._mission_success_dataset(base))
         success_filters = [condition for condition in request["filters"] if condition["field"] in MISSION_FIELDS]
         if success_filters:
             dataset = _global_filters(dataset, success_filters)
@@ -1338,7 +1379,9 @@ class QueryEngine:
             context.update(request["context"])
         if not isinstance(context, dict) or not set(context).issubset({"department_id", "group_id", "category"}):
             raise QueryError("Invalid comparison context")
-        if level in {"group", "team"} and not context.get("department_id"):
+        # Companies may be compared across the brigade (a company commander's peers);
+        # crews stay within one battalion and company.
+        if level == "team" and not context.get("department_id"):
             raise QueryError("Group and team comparisons require department context")
         if level == "team" and not context.get("group_id"):
             raise QueryError("Team comparison requires group context")
