@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 
 from app.core.config import get_settings
 from app.core.kpi_configuration import KpiConfiguration
+from app.core.ranking_configuration import RankingConfiguration
 
 FilterKey = Literal["organization", "category", "purpose", "direction", "unit", "asset", "group", "class_name", "result", "time"]
 MetricKey = Literal["flights", "effective", "detected", "affected", "destroyed", "efficiency", "avg_flights_per_position", "weighted_efficiency"]
@@ -181,6 +182,7 @@ class ApplicationConfiguration(ConfigurationModel):
     dictionaries: DictionaryConfiguration
     # Older persisted versions intentionally load their original calculations.
     kpi: KpiConfiguration = Field(default_factory=KpiConfiguration)
+    ranking: RankingConfiguration = Field(default_factory=RankingConfiguration)
 
 
 class RevisionSummary(ConfigurationModel):

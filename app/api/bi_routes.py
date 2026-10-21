@@ -122,7 +122,7 @@ class RankingRequest(BiModel):
     filters: list[QueryFilter] = Field(default_factory=list, max_length=100)
     time_from: str | None = Field(default=None, pattern=r'^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$')
     time_to: str | None = Field(default=None, pattern=r'^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$')
-    metric: str = Field(default='efficiency', min_length=1, max_length=128)
+    metric: str | None = Field(default=None, max_length=128)  # ignored: the ranking combines all criteria
     min_flights: int | None = Field(default=None, ge=1, le=1000)
 
 
