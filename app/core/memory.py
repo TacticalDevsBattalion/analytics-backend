@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-_slots: threading.BoundedSemaphore | None = None
+_slots: 'Slots | None' = None
 _slots_lock = threading.Lock()
 _libc = None
 
@@ -68,21 +68,67 @@ def under_pressure() -> bool:
     return bool(limit) and used >= limit * _int_env('MEMORY_PRESSURE_PERCENT', 70, 10, 100) / 100
 
 
-def _semaphore() -> threading.BoundedSemaphore:
+class Slots:
+    """Units of heavy work; a long period takes every unit and so runs alone.
+
+    A waiting long computation is let in before new short ones, so it never starves.
+    """
+
+    def __init__(self, capacity: int):
+        self.capacity, self.free, self.waiting_whole = capacity, capacity, 0
+        self.condition = threading.Condition()
+
+    def acquire(self, units: int = 1) -> int:
+        units = min(max(units, 1), self.capacity)
+        with self.condition:
+            whole = units == self.capacity
+            self.waiting_whole += whole
+            try:
+                self.condition.wait_for(lambda: self.free >= units and (whole or not self.waiting_whole))
+            finally:
+                self.waiting_whole -= whole
+            self.free -= units
+        return units
+
+    def release(self, units: int = 1) -> None:
+        with self.condition:
+            self.free += units
+            self.condition.notify_all()
+
+
+def _semaphore() -> Slots:
     global _slots
     with _slots_lock:
         if _slots is None:
-            _slots = threading.BoundedSemaphore(_int_env('HEAVY_COMPUTE_CONCURRENCY', 2, 1, 32))
+            _slots = Slots(_int_env('HEAVY_COMPUTE_CONCURRENCY', 2, 1, 32))
         return _slots
 
 
+def period_days(date_range) -> int | None:
+    """Days in a DateRange model or a {'from', 'to'} dict; None when unknown."""
+    from datetime import date
+    try:
+        if isinstance(date_range, dict):
+            start, end = (date.fromisoformat(str(date_range[key])[:10]) for key in ('from', 'to'))
+        else:
+            start, end = date_range.date_from, date_range.date_to
+        return (end - start).days + 1
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+
+
 @contextmanager
-def heavy_slot():
-    """At most HEAVY_COMPUTE_CONCURRENCY (2) heavy computations hold their rows at once."""
+def heavy_slot(days: int | None = None):
+    """At most HEAVY_COMPUTE_CONCURRENCY (2) heavy computations hold their rows at once.
+
+    A period longer than HEAVY_LONG_RANGE_DAYS (45) holds months of rows (~1.2 GB for
+    four months) and runs alone, so two of them never meet under a 2 GB limit.
+    """
     slots = _semaphore()
-    slots.acquire()
+    long_range = days is not None and days > _int_env('HEAVY_LONG_RANGE_DAYS', 45, 1, 3660)
+    units = slots.acquire(slots.capacity if long_range else 1)
     try:
         yield
     finally:
-        slots.release()
+        slots.release(units)
         trim()

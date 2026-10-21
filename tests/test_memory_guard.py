@@ -29,25 +29,41 @@ class MemoryGuardTests(unittest.TestCase):
             self.assertEqual(memory.usage(), (900 * 2 ** 20, 1000 * 2 ** 20))
             self.assertTrue(memory.under_pressure())
 
+    def run_concurrently(self, periods):
+        active, peak, overlaps, lock = [0], [0], [], threading.Lock()
+
+        def work(days):
+            with memory.heavy_slot(days):
+                with lock:
+                    active[0] += 1
+                    peak[0] = max(peak[0], active[0])
+                    overlaps.append((days, active[0]))
+                time.sleep(0.05)
+                with lock:
+                    active[0] -= 1
+        threads = [threading.Thread(target=work, args=(days,)) for days in periods]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        return peak[0], overlaps
+
     def test_heavy_computations_are_limited(self):
-        with patch.object(memory, '_slots', threading.BoundedSemaphore(2)):
-            active, peak, lock = [0], [0], threading.Lock()
+        with patch.object(memory, '_slots', memory.Slots(2)):
+            peak, _ = self.run_concurrently([7] * 6)
+            self.assertEqual(peak, 2)
 
-            def work():
-                with memory.heavy_slot():
-                    with lock:
-                        active[0] += 1
-                        peak[0] = max(peak[0], active[0])
-                    time.sleep(0.05)
-                    with lock:
-                        active[0] -= 1
-            threads = [threading.Thread(target=work) for _ in range(6)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
-            self.assertEqual(peak[0], 2)
+    def test_a_long_period_runs_alone(self):
+        with patch.object(memory, '_slots', memory.Slots(2)):
+            peak, overlaps = self.run_concurrently([7, 134, 7, 7, 134, 30])
+            self.assertEqual(peak, 2)
+            # When a four-month computation started, nothing else was running.
+            self.assertTrue(all(active == 1 for days, active in overlaps if days == 134))
 
+    def test_period_days(self):
+        self.assertEqual(memory.period_days({'from': '2026-05-20', 'to': '2026-09-30'}), 134)
+        self.assertIsNone(memory.period_days(None))
 
 if __name__ == '__main__':
     unittest.main()

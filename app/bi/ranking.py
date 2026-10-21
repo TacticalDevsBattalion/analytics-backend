@@ -18,6 +18,7 @@ values (comparison.view_peer_raw) receive the whole list.
 """
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 from app.bi.engine import QueryError, QueryPermissionError
@@ -34,6 +35,19 @@ CRITERIA = (
 )
 SOURCE_METRICS = ("flights", "effective_net", "lost_devices")
 ORGANIZATION_FIELDS = {"department", "department_id", "bbak_id", "bbak", "bbak_title", "group", "group_id", "rota_id", "rota", "rota_title", "team", "team_id", "crew", "battalion", "unit", "units"}
+
+
+CHUNK_DAYS = 14
+
+
+def _chunks(date_range: dict[str, Any]) -> list[tuple[str, str]]:
+    start, end = (date.fromisoformat(str(date_range[key])[:10]) for key in ("from", "to"))
+    parts = []
+    while start <= end:
+        stop = min(start + timedelta(days=CHUNK_DAYS - 1), end)
+        parts.append((start.isoformat(), stop.isoformat()))
+        start = stop + timedelta(days=1)
+    return parts
 
 
 def _settings() -> RankingConfiguration:
@@ -112,7 +126,12 @@ def crew_ranking(service, principal, body: dict[str, Any], settings: RankingConf
     from app.bi.security import Principal
     system = Principal("ranking", "administrator", frozenset({"*"}), DataScope(scope_type="ALL"), "EXACT")
     base = {"date_range": body["date_range"], "filters": filters, "data_scope": "USER_SCOPE"}
-    daily = service.execute({**base, "metrics": metrics, "dimensions": [{"field": "category"}, {"field": "department"}, {"field": "team"}, {"field": "purpose"}, {"field": "date", "granularity": "day"}]}, system)["rows"]
+    # Crew × purpose × day makes many groups over months: read the days in parts. Each row
+    # is one day, so the parts never overlap and only one part's flights are held at once.
+    daily = []
+    for start, end in _chunks(body["date_range"]):
+        daily += service.execute({**base, "date_range": {"from": start, "to": end}, "metrics": metrics,
+                                  "dimensions": [{"field": "category"}, {"field": "department"}, {"field": "team"}, {"field": "purpose"}, {"field": "date", "granularity": "day"}]}, system)["rows"]
     # The company a crew flies for (the one with most of its flights, should it ever change).
     companies: dict[tuple, tuple[str, int]] = {}
     for row in service.execute({**base, "metrics": [{"key": "flights"}], "dimensions": [{"field": "department"}, {"field": "group"}, {"field": "team"}]}, system)["rows"]:

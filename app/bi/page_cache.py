@@ -66,15 +66,16 @@ def page_json(definition, body, user, service, *, serve_stale=True) -> bytes:
     """
     start, end = body.date_range.date_from, body.date_range.date_to
     ttl = service.cache_policy.ttl_for_range(start, end, service.today())
+    days = (end - start).days + 1
     if ttl <= 0:
-        with heavy_slot():
+        with heavy_slot(days):
             return _json(query_page(definition, body, user, service))
     signature, tags = page_signature(definition, body, user, service)
 
     def compute():
         # Two pages at a time: each holds the period's rows (~0.5 GB a month), and
         # being CPU-bound they would not finish sooner side by side anyway.
-        with heavy_slot():
+        with heavy_slot(days):
             content = _json(query_page(definition, body, user, service))
         # A widget that failed (source unavailable, timeout) must not stick for the TTL.
         if b'"status":"error"' in content and any(item['status'] == 'error' for item in json.loads(content)['results']):

@@ -23,7 +23,8 @@ class FakeService:
     def execute(self, request, principal):
         self.requests.append((request, principal))
         if any(item["field"] == "date" for item in request["dimensions"]):
-            return {"rows": self.rows}
+            period = request["date_range"]
+            return {"rows": [row for row in self.rows if period["from"] <= row["date"] <= period["to"]]}
         companies = {}
         for row in self.rows:
             key = (row["department"], row["_company"], row["team"])
@@ -145,6 +146,13 @@ class RankingTests(unittest.TestCase):
         self.assertEqual({item["crew"]: item["brigade_place"] for item in result["rows"] if item["mission"] == "all"}, {"B": 1, "A": 2})
         with self.assertRaises(QueryPermissionError):
             rank(ROWS, Principal("u", "viewer", frozenset({"metric.view"}), principal("command").scope))
+
+    def test_long_periods_are_read_in_parts(self):
+        service = FakeService(ROWS[:2])
+        crew_ranking(service, principal("command"), {**BODY, "date_range": {"from": "2026-05-20", "to": "2026-09-30"}}, SETTINGS)
+        daily = [request["date_range"] for request, _ in service.requests if any(item["field"] == "date" for item in request["dimensions"])]
+        self.assertEqual((daily[0], daily[-1]["to"], len(daily)), ({"from": "2026-05-20", "to": "2026-06-02"}, "2026-09-30", 10))
+        self.assertTrue(all(a["to"] < b["from"] for a, b in zip(daily, daily[1:])))
 
     def test_settings_validation(self):
         with self.assertRaises(ValueError):

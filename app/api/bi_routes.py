@@ -26,7 +26,7 @@ from app.core.user_accounts import account_operation, get_user_account_store
 from app.core.user_accounts import check_request_origin
 from app.bi.cache_admin import CacheInvalidation, CacheWarmRequest
 from app.core.shared_cache import SharedCacheUnavailable
-from app.core.memory import heavy_slot
+from app.core.memory import heavy_slot, period_days
 from app.bi.mission_kpi import MissionKpiRequest
 
 logger = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ def semantic_options(body: DateRange, user: Principal = Depends(principal)):
 @router.post('/analytics/query', response_model=QueryResult, operation_id='queryBiAnalytics')
 def query(body: QueryRequest, user: Principal = Depends(principal)):
     def run():
-        with heavy_slot():
+        with heavy_slot(period_days(body.date_range)):
             return engine().execute(body, user)
     return operation(run)
 
@@ -130,13 +130,12 @@ class RankingRequest(BiModel):
 def crew_ranking(body: RankingRequest, user: Principal = Depends(principal)):
     from app.api.analytics_pages import PageQuery
     from app.bi.ranking import crew_ranking as rank
-    from app.core.memory import heavy_slot
 
     def run():
         # A reporting day (time_from/time_to) becomes a timestamp window, as on the pages.
         window = PageQuery(date_range=body.date_range, filters=body.filters, time_from=body.time_from, time_to=body.time_to).bounded_filters()
         request = {**body.model_dump(mode='json', by_alias=True, exclude_none=True, exclude={'time_from', 'time_to'}), 'filters': [item.model_dump(mode='json') for item in window]}
-        with heavy_slot():
+        with heavy_slot(period_days(body.date_range)):
             return rank(engine(), user, request)
     return operation(run)
 
@@ -289,7 +288,7 @@ class DashboardQuery(BiModel):
 @router.post('/analytics/dashboards/{dashboard_id}/query', operation_id='queryBiDashboard')
 def dashboard_query(dashboard_id: str, body: DashboardQuery, user: Principal = Depends(principal)):
     def run():
-        with heavy_slot():
+        with heavy_slot(period_days(body.date_range)):
             return compute()
 
     def compute():

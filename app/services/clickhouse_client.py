@@ -97,26 +97,27 @@ class ClickHouseClient:
             params[f"param_{key}"] = value
 
         started = time.perf_counter()
+        from app.core.observability import request_id
+        rows: list[dict[str, Any]] = []
+        # Streamed line by line: a months-long read never holds the whole body, and
+        # repeated keys and texts (departments, crews, purposes) become one object each.
+        # Parsing four months at once used to take ~1 GB before any of it was shared.
+        shared: dict[str, str] = {}
+        share = lambda value: shared.setdefault(value, value) if value.__class__ is str else value
         try:
-            response = self._http().post("/", params=params, content=query.encode("utf-8"))
+            with self._http().stream("POST", "/", params=params, content=query.encode("utf-8")) as response:
+                logger.info('clickhouse_request query_id=%s sql_hash=%s status=%s db_ms=%.2f', request_id.get(), hashlib.sha256(query.encode()).hexdigest()[:16], response.status_code, (time.perf_counter() - started) * 1000)
+                if response.status_code >= 400:
+                    match = re.search(r'\bCode:\s*(\d+)\b', response.read()[:100].decode("utf-8", "replace"))
+                    code = match.group(1) if match else 'unknown'
+                    logger.warning('clickhouse_request_failed query_id=%s status=%s error_code=%s', request_id.get(), response.status_code, code)
+                    raise RuntimeError(f'ClickHouse returned {response.status_code} (error code {code})') from None
+                for line in response.iter_lines():
+                    if line.strip():
+                        rows.append({share(key): share(value) for key, value in json.loads(line).items()})
         except httpx.HTTPError as exc:
             logger.warning('clickhouse_request status=connection_error error_type=%s db_ms=%.2f', type(exc).__name__, (time.perf_counter() - started) * 1000)
             raise RuntimeError('ClickHouse connection is unavailable') from None
-
-        from app.core.observability import request_id
-        logger.info('clickhouse_request query_id=%s sql_hash=%s status=%s db_ms=%.2f', request_id.get(), hashlib.sha256(query.encode()).hexdigest()[:16], response.status_code, (time.perf_counter() - started) * 1000)
-
-        if response.status_code >= 400:
-            match = re.search(r'\bCode:\s*(\d+)\b', response.text[:100])
-            code = match.group(1) if match else 'unknown'
-            logger.warning('clickhouse_request_failed query_id=%s status=%s error_code=%s', request_id.get(), response.status_code, code)
-            raise RuntimeError(f'ClickHouse returned {response.status_code} (error code {code})') from None
-
-        rows: list[dict[str, Any]] = []
-        for line in response.text.splitlines():
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
         return rows
 
     def scalar(self, sql: str, *, parameters: dict[str, Any] | None = None) -> Any:
