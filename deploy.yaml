@@ -27,7 +27,8 @@
 #              (http://host:8123 або https://host:8443), CLICKHOUSE_DATABASE, CLICKHOUSE_USER,
 #              CLICKHOUSE_VERIFY_SSL, KEYCLOAK_ENABLED ("true"), KEYCLOAK_ISSUER
 #              (https://auth.infrastructure.kub.k2.lan/realms/k2), KEYCLOAK_CLIENT_ID, KEYCLOAK_ADMIN_ROLE
-#   Secret:    CLICKHOUSE_PASSWORD, KEYCLOAK_CLIENT_SECRET,
+#   Secret:    CLICKHOUSE_PASSWORD, KEYCLOAK_CLIENT_SECRET (лише для режиму keycloak),
+#              K2_AUTH_CLIENT_SECRET (= CLIENT_SECRET_ANALYTICS у k2-auth-secret),
 #              DATABASE_URL (postgresql://user:password@host:port/db — користувачі, доступи, дашборди
 #              і налаштування в PostgreSQL; без нього — SQLite-файли з PVC, як раніше),
 #              APP_ADMIN_TOKEN (лише без Keycloak — створення першого адміна),
@@ -35,8 +36,13 @@
 #   kubectl -n ${NAMESPACE} patch secret ${SERVICE_NAME}-secret -p '{"stringData":{"CLICKHOUSE_PASSWORD":"…"}}'
 #   kubectl -n ${NAMESPACE} patch configmap ${SERVICE_NAME}-config -p '{"data":{"CLICKHOUSE_URL":"…"}}'
 #
-# Keycloak: клієнт KEYCLOAK_CLIENT_ID — confidential, redirect URI https://${HOST}/api/auth/keycloak/callback,
-# post-logout https://${HOST}/.
+# Вхід — через K2 Auth (AUTH_PROVIDER=k2auth нижче, як у Літописі): спільна сторінка входу auth.kub.k2.lan,
+# клієнт "analytics" у kk-web-auth config/issuers.json (redirect https://${HOST}/api/auth/keycloak/callback,
+# post-logout https://${HOST} і https://${HOST}/, back-channel
+# http://${SERVICE_NAME}.${NAMESPACE}.svc:8000/api/auth/k2/backchannel-logout). Акаунти — за Keycloak-sub під
+# KEYCLOAK_ISSUER, тому KEYCLOAK_ISSUER/KEYCLOAK_ADMIN_ROLE/KEYCLOAK_CLIENT_ID у ConfigMap лишаються.
+# Відкат на прямий Keycloak: AUTH_PROVIDER="keycloak" + KEYCLOAK_ENABLED ("true"), клієнт KEYCLOAK_CLIENT_ID —
+# confidential, redirect URI https://${HOST}/api/auth/keycloak/callback, post-logout https://${HOST}/.
 #
 # Ключі нижче в env: перебивають ConfigMap/Secret — це структура деплою (шляхи, Redis, префікс, хост).
 # =============================================================================
@@ -155,6 +161,13 @@ spec:
               value: "https://${HOST}/api/auth/keycloak/callback"
             - name: KEYCLOAK_FRONTEND_URL
               value: "https://${HOST}"
+            # Основний вхід — K2 Auth (спільна сторінка входу K2). Секрет клієнта — K2_AUTH_CLIENT_SECRET у Secret.
+            - name: AUTH_PROVIDER
+              value: "k2auth"
+            - name: K2_AUTH_ISSUER
+              value: "https://auth.kub.k2.lan"
+            - name: K2_AUTH_CLIENT_ID
+              value: "analytics"
             - name: REDIS_URL
               value: "redis://${SERVICE_NAME}-redis:6379/0"
             - name: CACHE_ENABLED

@@ -205,7 +205,7 @@ class KeycloakTests(KeycloakFixture):
 
     def test_issuer_namespaces_federated_identity_and_cannot_link_by_display_name(self):
         _, a = keycloak.establish_session(self.claims(name="Same name"), self.config)
-        _, b = keycloak.establish_session(self.claims(name="Same name"), {**self.config, "issuer": "https://other.example/realms/analytics"})
+        _, b = keycloak.establish_session(self.claims(name="Same name"), {**self.config, "issuer": "https://other.example/realms/analytics", "identity_issuer": "https://other.example/realms/analytics"})
         self.assertNotEqual(a.id, b.id)
         self.assertEqual(len(self.store.users()), 3)
 
@@ -377,3 +377,115 @@ class KeycloakPasswordLoginTests(KeycloakFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class K2AuthTests(KeycloakFixture):
+    """AUTH_PROVIDER=k2auth: the shared login page of the K2 apps (oidc-provider)."""
+    K2 = "https://auth.k2.example"
+
+    def setUp(self):
+        super().setUp()
+        keycloak._discovered.clear()
+        self.enterContext(patch.dict(os.environ, {"AUTH_PROVIDER": "k2auth", "K2_AUTH_ISSUER": self.K2, "K2_AUTH_CLIENT_ID": "analytics", "K2_AUTH_CLIENT_SECRET": "k2 secret/+", "KEYCLOAK_ENABLED": ""}))
+        self.config = keycloak.configuration()
+        discovery = {"issuer": self.K2, "authorization_endpoint": self.K2 + "/auth", "token_endpoint": self.K2 + "/token", "jwks_uri": self.K2 + "/jwks", "end_session_endpoint": self.K2 + "/session/end"}
+
+        def get(url, *args, **kwargs):
+            response = MagicMock()
+            response.json.return_value = discovery if url.endswith("/.well-known/openid-configuration") else {"keys": [self.jwk]}
+            return response
+        self.http.get.side_effect = get
+
+    def claims(self, **updates):
+        base = super().claims(**updates)
+        base.pop("realm_access", None)
+        return {"iss": self.K2, "aud": "analytics", "sid": "k2-login-1", "roles": [], **{k: v for k, v in base.items() if k not in {"iss", "aud"}}, **updates}
+
+    def login(self, **claims):
+        _, query, browser = self.begin()
+        self.http.post.return_value.json.return_value = {"id_token": self.signed(nonce=query["nonce"][0], **claims), "access_token": "opaque"}
+        return keycloak.complete_login("code-1", query["state"][0], browser)
+
+    def test_provider_is_k2auth_without_password_form(self):
+        self.assertTrue(keycloak.enabled())
+        self.assertFalse(keycloak.password_login_enabled())
+        with self.assertRaises(HTTPException):
+            keycloak.password_login("person", "secret", "client")
+        app = FastAPI(); app.include_router(router, prefix="/api")
+        body = TestClient(app).get("/api/auth/provider").json()
+        self.assertEqual(body, {"provider": "k2auth", "login_url": "/api/auth/keycloak/login", "password_login": False})
+
+    def test_authorization_url_comes_from_discovery_with_pkce_and_no_keycloak_action(self):
+        url, query, _ = self.begin()
+        self.assertTrue(url.startswith(self.K2 + "/auth?"))
+        self.assertEqual(query["scope"], ["openid profile roles"])
+        self.assertEqual(query["code_challenge_method"], ["S256"])
+        with self.assertRaises(HTTPException):
+            keycloak.begin_login("password")
+
+    def test_code_is_exchanged_with_client_secret_basic(self):
+        token, user = self.login()
+        call = self.http.post.call_args
+        self.assertEqual(call.args[0], self.K2 + "/token")
+        self.assertEqual(call.kwargs["auth"], ("analytics", "k2%20secret%2F%2B"))
+        self.assertNotIn("client_secret", call.kwargs["data"])
+        self.assertNotIn("client_id", call.kwargs["data"])
+        self.assertEqual(self.store.session_user(token).id, user.id)
+
+    def test_existing_keycloak_account_is_kept(self):
+        with patch.dict(os.environ, {"AUTH_PROVIDER": "", "KEYCLOAK_ENABLED": "true"}):
+            config = keycloak.configuration()
+            _, before = keycloak.establish_session(super().claims(), config)
+        _, after = self.login()
+        self.assertEqual(before.id, after.id)
+
+    def test_admin_role_from_k2auth_roles_or_app_client_roles(self):
+        _, user = self.login(roles=["Analytics-Admin"])
+        self.assertEqual(user.role, "administrator")
+        _, other = self.login(sub="person-2", roles=[], resource_access={"analytics-ui": {"roles": ["analytics-admin"]}})
+        self.assertEqual(other.role, "administrator")
+        _, viewer = self.login(sub="person-3", resource_access={"someone-else": {"roles": ["analytics-admin"]}})
+        self.assertEqual(viewer.role, "viewer")
+
+    def test_logout_url_is_k2auth_end_session(self):
+        url = keycloak.logout_url()
+        self.assertTrue(url.startswith(self.K2 + "/session/end?"))
+        self.assertEqual(parse_qs(urlsplit(url).query), {"client_id": ["analytics"], "post_logout_redirect_uri": ["https://analytics.example/"]})
+        with patch.dict(os.environ, {"K2_AUTH_LOGOUT": "false"}):
+            self.assertIsNone(keycloak.logout_url())
+
+    def logout_token(self, key=None, **updates):
+        now = int(time.time())
+        claims = {"iss": self.K2, "aud": "analytics", "iat": now, "jti": "j1", "sub": "federated-person-1", "sid": "k2-login-1",
+                  "events": {keycloak.BACKCHANNEL_EVENT: {}}, **updates}
+        claims = {k: v for k, v in claims.items() if v is not None}
+        return jwt.encode(claims, key or self.private_key, algorithm="RS256", headers={"kid": "test-key"})
+
+    def test_backchannel_logout_ends_only_that_login(self):
+        first, _ = self.login()
+        second, _ = self.login(sid="k2-login-2")
+        app = FastAPI(); app.include_router(router, prefix="/api")
+        client = TestClient(app)
+        response = client.post("/api/auth/k2/backchannel-logout", data={"logout_token": self.logout_token()})
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self.store.session_user(first))
+        self.assertIsNotNone(self.store.session_user(second))
+        # Without sid: every session of the person.
+        self.assertEqual(keycloak.backchannel_logout(self.logout_token(sid=None)), 1)
+        self.assertIsNone(self.store.session_user(second))
+
+    def test_backchannel_logout_rejects_forged_or_wrong_tokens(self):
+        token, _ = self.login()
+        for bad in (self.logout_token(key=self.other_key), self.logout_token(aud="other"), self.logout_token(iss="https://evil.example"),
+                    self.logout_token(events={}), self.logout_token(nonce="n"), self.logout_token(sid=None, sub=None), "", "x" * 20000):
+            with self.assertRaises(HTTPException):
+                keycloak.backchannel_logout(bad)
+        self.assertIsNotNone(self.store.session_user(token))
+
+    def test_discovery_on_another_host_is_refused(self):
+        keycloak._discovered.clear()
+        evil = {"issuer": self.K2, "authorization_endpoint": "https://evil.example/auth", "token_endpoint": self.K2 + "/token", "jwks_uri": self.K2 + "/jwks"}
+        self.http.get.side_effect = None
+        self.http.get.return_value.json.return_value = evil
+        with self.assertRaises(ValueError):
+            keycloak.endpoints(self.config)

@@ -349,7 +349,7 @@ def iter_tables() -> Iterator[str]:
     """Tables owned by the stores, in an order that satisfies foreign keys."""
     yield from (
         "account_state", "users", "sessions", "dashboard_preferences", "login_attempts", "account_schema_migrations",
-        "federated_identities", "oidc_login_states",
+        "federated_identities", "oidc_login_states", "federated_sessions",
         "configuration_versions", "configuration_state", "configuration_draft",
         "bi_schema_migrations", "bi_state", "bi_bootstrap_versions", "dashboards", "dashboard_widgets", "dashboard_assignments",
         "dashboard_user_overrides", "dashboard_override_revisions", "dashboard_personal_widgets", "metric_definitions",
