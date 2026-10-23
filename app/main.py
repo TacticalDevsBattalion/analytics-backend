@@ -12,6 +12,7 @@ from app.api.configuration_routes import router as configuration_router
 from app.api.account_routes import router as account_router
 from app.api.keycloak_routes import router as keycloak_router
 from app.api.bi_routes import router as bi_router
+from app.api.dataset_routes import router as dataset_router
 from app.api.access_routes import router as access_router
 from app.api.preferences_routes import router as preferences_router
 from app.api.kpi_policy_routes import router as kpi_policy_router
@@ -51,6 +52,7 @@ app.include_router(configuration_router, prefix=api_config.router_prefix)
 app.include_router(account_router, prefix=api_config.router_prefix)
 app.include_router(keycloak_router, prefix=api_config.router_prefix)
 app.include_router(bi_router, prefix=api_config.router_prefix)
+app.include_router(dataset_router, prefix=api_config.router_prefix)
 app.include_router(access_router, prefix=api_config.router_prefix)
 app.include_router(preferences_router, prefix=api_config.router_prefix)
 app.include_router(kpi_policy_router, prefix=api_config.router_prefix)

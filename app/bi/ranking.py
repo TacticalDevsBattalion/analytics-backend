@@ -123,24 +123,53 @@ def crew_ranking(service, principal, body: dict[str, Any], settings: RankingConf
     see_all = principal.is_administrator or (scope.scope_type == "ALL" and principal.has("comparison.view_peer_raw"))
     if not see_all and scope.scope_type not in {"DEPARTMENT", "GROUP"}:
         raise QueryPermissionError("Crew ranking needs a battalion or company scope")
-    from app.bi.security import Principal
-    system = Principal("ranking", "administrator", frozenset({"*"}), DataScope(scope_type="ALL"), "EXACT")
-    base = {"date_range": body["date_range"], "filters": filters, "data_scope": "USER_SCOPE"}
-    # Crew × purpose × day makes many groups over months: read the days in parts. Each row
-    # is one day, so the parts never overlap and only one part's flights are held at once.
-    daily = []
-    for start, end in _chunks(body["date_range"]):
-        daily += service.execute({**base, "date_range": {"from": start, "to": end}, "metrics": metrics,
-                                  "dimensions": [{"field": "category"}, {"field": "department"}, {"field": "team"}, {"field": "purpose"}, {"field": "date", "granularity": "day"}]}, system)["rows"]
+    from app.bi import ranking_sql
+    use_sql = ranking_sql.supported(service, definitions, filters)
+    compute = lambda: _brigade(service, body, filters, settings, use_sql)
+    # The brigade-wide rows are the same for every viewer: one cached entry serves them all.
+    rows = ranking_sql.cached(service, body, filters, settings, compute) if use_sql else compute()
+    own_ids = set(scope.scope_ids)
+    output = [row for row in rows if see_all or (row["battalion_id"] if scope.scope_type == "DEPARTMENT" else row["company_id"]) in own_ids]
+    order = [OVERALL[0], *(group.id for group in settings.mission_groups), OTHER_GROUP[0]]
+    titles = {group.id: group.title for group in settings.mission_groups} | {OTHER_GROUP[0]: OTHER_GROUP[1]}
+    present = {row["mission"] for row in output}
+    weights = settings.weights.model_dump()
+    return {
+        "missions": [{"id": key, "title": OVERALL[1] if key == OVERALL[0] else titles[key]} for key in order if key in present],
+        "criteria": [{"key": key, "title": title, "weight": weights[key], "higher_is_better": higher} for key, title, higher in CRITERIA],
+        "ignore_losses": {group.id: group.ignore_losses_for for group in settings.mission_groups if group.ignore_losses_for},
+        "min_flights": settings.min_flights, "full_list": see_all, "rows": output,
+    }
+
+
+def _brigade(service, body: dict[str, Any], filters: list[dict[str, Any]], settings: RankingConfiguration, use_sql: bool) -> list[dict[str, Any]]:
+    """Every ranked crew of the brigade with its places, before any viewer's scope."""
+    if use_sql:
+        from app.bi import ranking_sql
+        # ClickHouse groups the records; only thousands of groups reach Python.
+        daily, crew_companies = ranking_sql.read(service, body, filters)
+    else:
+        from app.bi.security import Principal
+        system = Principal("ranking", "administrator", frozenset({"*"}), DataScope(scope_type="ALL"), "EXACT")
+        metrics = [{"key": key} for key in SOURCE_METRICS]
+        base = {"date_range": body["date_range"], "filters": filters, "data_scope": "USER_SCOPE"}
+        from app.core.memory import heavy_slot, period_days
+        with heavy_slot(period_days(body["date_range"])):
+            # Crew × purpose × day makes many groups over months: read the days in parts. Each row
+            # is one day, so the parts never overlap and only one part's flights are held at once.
+            daily = []
+            for start, end in _chunks(body["date_range"]):
+                daily += service.execute({**base, "date_range": {"from": start, "to": end}, "metrics": metrics,
+                                          "dimensions": [{"field": "category"}, {"field": "department"}, {"field": "team"}, {"field": "purpose"}, {"field": "date", "granularity": "day"}]}, system)["rows"]
+            crew_companies = service.execute({**base, "metrics": [{"key": "flights"}], "dimensions": [{"field": "department"}, {"field": "group"}, {"field": "team"}]}, system)["rows"]
     # The company a crew flies for (the one with most of its flights, should it ever change).
     companies: dict[tuple, tuple[str, int]] = {}
-    for row in service.execute({**base, "metrics": [{"key": "flights"}], "dimensions": [{"field": "department"}, {"field": "group"}, {"field": "team"}]}, system)["rows"]:
+    for row in crew_companies:
         crew, flights = (str(row.get("department")), str(row.get("team"))), int(row.get("flights") or 0)
         if flights > companies.get(crew, ("", -1))[1]:
             companies[crew] = (str(row.get("group")), flights)
 
     group_of = settings.group_of()
-    titles = {group.id: group.title for group in settings.mission_groups} | {OTHER_GROUP[0]: OTHER_GROUP[1]}
     ignored = {group.id: {normalize_kpi_text(item) for item in group.ignore_losses_for} for group in settings.mission_groups}
     # (кафедра, group) → crew → totals for that kind of mission.
     buckets: dict[tuple[str, str], dict[tuple, dict]] = {}
@@ -186,7 +215,6 @@ def crew_ranking(service, principal, body: dict[str, Any], settings: RankingConf
     for category, members in by_category.items():
         ranked[(category, OVERALL[0])] = members
 
-    own_ids = set(scope.scope_ids)
     output = []
     for (category, mission), members in ranked.items():
         for crew in members:
@@ -202,9 +230,6 @@ def crew_ranking(service, principal, body: dict[str, Any], settings: RankingConf
         battalion_places = {department: _places(rows) for department, rows in battalions.items()}
         company_places = {key: _places(rows) for key, rows in units.items()}
         for crew in members:
-            mine = see_all or (crew["department"] in own_ids if scope.scope_type == "DEPARTMENT" else crew["group"] in own_ids)
-            if not mine:
-                continue
             company = (crew["department"], crew["group"])
             row = {
                 "category": category, "mission": mission, "battalion_id": crew["department"], "company_id": crew["group"], "crew": crew["team"],
@@ -221,11 +246,4 @@ def crew_ranking(service, principal, body: dict[str, Any], settings: RankingConf
             output.append(row)
     order = [OVERALL[0], *(group.id for group in settings.mission_groups), OTHER_GROUP[0]]
     output.sort(key=lambda row: (order.index(row["mission"]), row["category"], row["brigade_place"], row["crew"]))
-    present = {row["mission"] for row in output}
-    weights = settings.weights.model_dump()
-    return {
-        "missions": [{"id": key, "title": OVERALL[1] if key == OVERALL[0] else titles[key]} for key in order if key in present],
-        "criteria": [{"key": key, "title": title, "weight": weights[key], "higher_is_better": higher} for key, title, higher in CRITERIA],
-        "ignore_losses": {group.id: group.ignore_losses_for for group in settings.mission_groups if group.ignore_losses_for},
-        "min_flights": settings.min_flights, "full_list": see_all, "rows": output,
-    }
+    return output

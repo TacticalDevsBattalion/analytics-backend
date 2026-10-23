@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from typing import Literal, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -28,6 +29,7 @@ from app.bi.cache_admin import CacheInvalidation, CacheWarmRequest
 from app.core.shared_cache import SharedCacheUnavailable
 from app.core.memory import heavy_slot, period_days
 from app.bi.mission_kpi import MissionKpiRequest
+from app.bi import activity
 
 logger = logging.getLogger(__name__)
 
@@ -135,8 +137,12 @@ def crew_ranking(body: RankingRequest, user: Principal = Depends(principal)):
         # A reporting day (time_from/time_to) becomes a timestamp window, as on the pages.
         window = PageQuery(date_range=body.date_range, filters=body.filters, time_from=body.time_from, time_to=body.time_to).bounded_filters()
         request = {**body.model_dump(mode='json', by_alias=True, exclude_none=True, exclude={'time_from', 'time_to'}), 'filters': [item.model_dump(mode='json') for item in window]}
-        with heavy_slot(period_days(body.date_range)):
+        # The ranking takes a heavy slot itself, only when it has to load the records.
+        started = time.perf_counter()
+        try:
             return rank(engine(), user, request)
+        finally:
+            activity.touch(get_bi_store(), [('widget', 'crew-ranking')], total_ms=(time.perf_counter() - started) * 1000)
     return operation(run)
 
 
@@ -293,6 +299,14 @@ def dashboard_query(dashboard_id: str, body: DashboardQuery, user: Principal = D
 
     def compute():
         definition = load_dashboard(dashboard_id, user)
+        started = time.perf_counter()
+        try:
+            return answer(definition)
+        finally:
+            # How often each dashboard and widget is opened shows what can be retired.
+            activity.touch(get_bi_store(), [('dashboard', definition.id), *(('widget', widget.id) for widget in definition.widgets)], total_ms=(time.perf_counter() - started) * 1000)
+
+    def answer(definition):
         if dashboard_id in CANONICAL_PAGES:
             from app.api.analytics_pages import PageQuery
             from app.bi.widgets import query_page
@@ -534,7 +548,7 @@ def delete_definition(entity: str, entity_id: str, expected_revision: int, reque
                 else:
                     if any(widget.is_locked or widget.mandatory or not widget.removable for widget in definition.widgets):
                         raise PermissionError('A protected canonical page cannot be removed')
-                    get_bi_store().delete(entity, entity_id, expected_revision)
+                    get_bi_store().delete(entity, entity_id, expected_revision, user.user_id)
                 return
         admin_access(entity, user, 'widget.delete' if entity == 'widgets' else None)
         if entity == 'widgets' and get_bi_store().get(entity, entity_id).is_locked and not user.is_administrator:
@@ -545,6 +559,6 @@ def delete_definition(entity: str, entity_id: str, expected_revision: int, reque
                 raise HTTPException(403, 'Widget is locked')
             if definition.widgets:
                 require_permission(user, 'widget.delete')
-        get_bi_store().delete(entity, entity_id, expected_revision)
+        get_bi_store().delete(entity, entity_id, expected_revision, user.user_id)
     operation(run)
     return {'deleted': True}

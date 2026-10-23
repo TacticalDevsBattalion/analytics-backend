@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core import database
+from app.bi import activity
 from app.bi.models import (
     ENTITY_MODELS, CategoryWeight, DashboardAssignment, DashboardDefinition,
     DataScope, KpiDefinition, MetricDefinition, QueryRequest, RoleDefinition,
@@ -159,7 +160,7 @@ class BiStore:
                 return self._decode(entity, row, connection) if row else None
         return self._cached(("key", entity, key, weight_set_id), load)
 
-    def _save_record(self, connection, entity, definition, expected_revision):
+    def _save_record(self, connection, entity, definition, expected_revision, actor=None):
         table = self._table(entity)
         definition = ENTITY_MODELS[entity].model_validate(definition.model_dump() if isinstance(definition, VersionedEntity) else definition)
         if entity == "widgets" and connection.execute("SELECT 1 FROM dashboard_personal_widgets WHERE id=?", (definition.id,)).fetchone():
@@ -194,6 +195,9 @@ class BiStore:
         update = ",".join(f"{column}=excluded.{column}" for column in columns if column != "id")
         connection.execute(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in values)}) ON CONFLICT(id) DO UPDATE SET {update}", values)
         connection.execute("UPDATE bi_state SET configuration_revision=configuration_revision+1 WHERE id=1")
+        if entity in activity.TRACKED_ENTITIES:
+            activity.record(connection, entity.rstrip("s"), definition.id, "update" if current else "create", actor=actor, revision=definition.revision,
+                            before=current["definition_json"] if current else None, after=values[2])
         return definition
 
     def save(self, entity: str, definition, expected_revision: int | None = None, actor: str | None = None):
@@ -211,10 +215,11 @@ class BiStore:
                         raise BiConflict("Personal widgets must be saved separately from the system dashboard")
                     if definition.created_by is None:
                         definition.created_by = actor
-                    saved = self._save_record(connection, entity, definition, expected_revision)
+                    saved = self._save_record(connection, entity, definition, expected_revision, actor)
                     desired = {widget.id for widget in definition.widgets}
                     for existing in connection.execute("SELECT id FROM dashboard_widgets WHERE dashboard_id=?", (saved.id,)).fetchall():
                         if existing["id"] not in desired:
+                            activity.record(connection, "widget", existing["id"], "delete", actor=actor)
                             connection.execute("DELETE FROM dashboard_user_overrides WHERE widget_id=?", (existing["id"],))
                             connection.execute("DELETE FROM dashboard_widgets WHERE id=?", (existing["id"],))
                     saved.widgets = []
@@ -223,7 +228,7 @@ class BiStore:
                         if owned is not None and owned["dashboard_id"] != saved.id:
                             raise BiConflict("A widget cannot be moved between dashboards")
                         widget = widget.model_copy(update={"dashboard_id": saved.id})
-                        saved.widgets.append(self._save_record(connection, "widgets", widget, None))
+                        saved.widgets.append(self._save_record(connection, "widgets", widget, None, actor))
                     connection.execute("DELETE FROM dashboard_assignments WHERE dashboard_id=?", (saved.id,))
                     for assignment in saved.assignments:
                         connection.execute("INSERT OR IGNORE INTO dashboard_assignments VALUES (?,?,?)", (saved.id, assignment.assignment_type, assignment.assignment_id))
@@ -239,15 +244,15 @@ class BiStore:
                     raise BiConflict("Personal widgets must be saved separately from the system dashboard")
                 if entity == "overrides":
                     self._owned_layout_widget(connection, definition.dashboard_id, definition.user_id, definition.widget_id)
-                return self._save_record(connection, entity, definition, expected_revision)
+                return self._save_record(connection, entity, definition, expected_revision, actor)
         except sqlite3.IntegrityError as exc:
             raise BiConflict("Duplicate key or invalid BI relationship") from exc
 
-    def delete(self, entity: str, entity_id: str, expected_revision: int | None = None):
+    def delete(self, entity: str, entity_id: str, expected_revision: int | None = None, actor: str | None = None):
         table = self._table(entity)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(f"SELECT revision FROM {table} WHERE id=?", (entity_id,)).fetchone()
+            row = connection.execute(f"SELECT revision, definition_json FROM {table} WHERE id=?", (entity_id,)).fetchone()
             if row is None:
                 raise BiNotFound("BI definition was not found")
             if expected_revision is None or row["revision"] != expected_revision:
@@ -263,6 +268,8 @@ class BiStore:
                         raise BiConflict("The weight set is used by a metric")
             connection.execute(f"DELETE FROM {table} WHERE id=?", (entity_id,))
             connection.execute("UPDATE bi_state SET configuration_revision=configuration_revision+1 WHERE id=1")
+            if entity in activity.TRACKED_ENTITIES:
+                activity.record(connection, entity.rstrip("s"), entity_id, "delete", actor=actor, revision=row["revision"], before=row["definition_json"])
 
     def _stored_revision(self) -> int:
         with self._connection() as connection:
@@ -454,12 +461,14 @@ class BiStore:
             saved = definition.model_copy(deep=True, update={"owner_id": user_id, "dashboard_id": dashboard_id, "revision": revision + 1, "created_at": existing["created_at"] if existing else now, "updated_at": now})
             connection.execute("INSERT INTO dashboard_personal_widgets VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,definition_json=excluded.definition_json,updated_at=excluded.updated_at", (saved.id, user_id, dashboard_id, saved.revision, saved.model_dump_json(by_alias=True), saved.created_at, saved.updated_at))
             connection.execute("UPDATE bi_state SET configuration_revision=configuration_revision+1 WHERE id=1")
+            activity.record(connection, "widget", saved.id, "update" if existing else "create", actor=user_id, revision=saved.revision,
+                            before=existing["definition_json"] if existing else None, after=saved.model_dump_json(by_alias=True))
             return saved
 
     def delete_personal_widget(self, dashboard_id: str, user_id: str, widget_id: str, expected_revision: int):
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute("SELECT revision FROM dashboard_personal_widgets WHERE id=? AND dashboard_id=? AND user_id=?", (widget_id, dashboard_id, user_id)).fetchone()
+            row = connection.execute("SELECT revision, definition_json FROM dashboard_personal_widgets WHERE id=? AND dashboard_id=? AND user_id=?", (widget_id, dashboard_id, user_id)).fetchone()
             if row is None:
                 raise BiNotFound("Personal widget was not found")
             if row["revision"] != expected_revision:
@@ -467,6 +476,7 @@ class BiStore:
             connection.execute("DELETE FROM dashboard_user_overrides WHERE widget_id=? AND user_id=?", (widget_id, user_id))
             connection.execute("DELETE FROM dashboard_personal_widgets WHERE id=? AND user_id=?", (widget_id, user_id))
             connection.execute("UPDATE bi_state SET configuration_revision=configuration_revision+1 WHERE id=1")
+            activity.record(connection, "widget", widget_id, "delete", actor=user_id, revision=row["revision"], before=row["definition_json"])
 
 
 _stores: dict[str, BiStore] = {}

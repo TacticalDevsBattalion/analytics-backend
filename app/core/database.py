@@ -355,5 +355,5 @@ def iter_tables() -> Iterator[str]:
         "dashboard_user_overrides", "dashboard_override_revisions", "dashboard_personal_widgets", "metric_definitions",
         "kpi_definitions", "weight_sets", "category_weights", "roles", "user_access", "analytics_cache_jobs",
         "kpi_policy_versions", "personal_dashboard_preferences", "dashboard_assets", "dashboard_asset_content",
-        "access_audit", "user_preferences",
+        "access_audit", "user_preferences", "sql_datasets", "sql_dataset_versions", "analytics_history", "analytics_usage",
     )
